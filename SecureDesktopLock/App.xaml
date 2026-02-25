@@ -1,0 +1,16 @@
+﻿<Application x:Class="SecureDesktopLock.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="clr-namespace:SecureDesktopLock"
+             Startup="Application_Startup"
+             Exit="Application_Exit">
+    <!--
+        NOTE: StartupUri is intentionally absent.
+        The first window is created programmatically in Application_Startup
+        so that services can be initialised and the single-instance check can
+        run before any UI appears.
+    -->
+    <Application.Resources>
+        <!-- Global resource dictionary (currently empty; add themes here) -->
+    </Application.Resources>
+</Application>

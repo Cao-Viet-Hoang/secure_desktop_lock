@@ -1,0 +1,28 @@
+# Visual Studio build output
+bin/
+obj/
+*.user
+*.suo
+.vs/
+*.ncb
+*.sdf
+*.VC.db
+*.VC.opendb
+
+# NuGet packages
+packages/
+*.nupkg
+
+# Firebase credentials — NEVER commit real config with database secrets
+firebase_config.json
+*_credentials.json
+*_service_account.json
+
+# Local cache and logs (runtime data)
+*.dat
+Logs/
+
+# OS artifacts
+Thumbs.db
+desktop.ini
+.DS_Store
