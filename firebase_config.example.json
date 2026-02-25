@@ -1,0 +1,4 @@
+{
+  "base_path":   "https://<YOUR_PROJECT_ID>.firebasedatabase.app/",
+  "auth_secret": "<YOUR_FIREBASE_DATABASE_SECRET>"
+}

@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Secure Desktop Lock — Manager Dashboard</title>
+    <style>
+        /* ───────────── Reset & Base ───────────── */
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+        :root {
+            --bg:       #0f1117;
+            --surface:  #1a1d27;
+            --card:     #222639;
+            --border:   #2e3348;
+            --accent:   #6c63ff;
+            --accent2:  #00c9a7;
+            --danger:   #ff4d6d;
+            --text:     #e4e6f0;
+            --muted:    #8b8fa3;
+            --radius:   12px;
+            --shadow:   0 4px 24px rgba(0,0,0,.35);
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* ───────────── Header ───────────── */
+        header {
+            width: 100%;
+            padding: 20px 32px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+        header h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        header h1 .icon { font-size: 1.5rem; }
+        .header-actions { display: flex; gap: 10px; align-items: center; }
+
+        /* ───────────── Buttons ───────────── */
+        .btn {
+            padding: 8px 18px;
+            border: none;
+            border-radius: 8px;
+            font-size: .875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all .2s;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .btn-primary   { background: var(--accent); color: #fff; }
+        .btn-primary:hover { background: #5a52e0; }
+        .btn-success   { background: var(--accent2); color: #000; }
+        .btn-success:hover { background: #00b396; }
+        .btn-danger    { background: var(--danger); color: #fff; }
+        .btn-danger:hover  { background: #e63f5e; }
+        .btn-outline   { background: transparent; color: var(--text); border: 1px solid var(--border); }
+        .btn-outline:hover { background: var(--card); }
+        .btn:disabled  { opacity: .5; cursor: not-allowed; }
+
+        /* ───────────── Login Panel ───────────── */
+        .login-wrapper {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex: 1;
+            width: 100%;
+            padding: 40px 16px;
+        }
+        .login-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 36px 32px;
+            width: 100%;
+            max-width: 520px;
+            box-shadow: var(--shadow);
+        }
+        .login-card h2 {
+            font-size: 1.35rem;
+            margin-bottom: 6px;
+        }
+        .login-card p.sub {
+            color: var(--muted);
+            font-size: .875rem;
+            margin-bottom: 22px;
+        }
+        .login-card label {
+            display: block;
+            font-size: .8rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            color: var(--muted);
+            margin-bottom: 6px;
+        }
+        .login-card textarea {
+            width: 100%;
+            min-height: 130px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-family: 'Cascadia Code', 'Fira Code', monospace;
+            font-size: .85rem;
+            padding: 14px;
+            resize: vertical;
+            transition: border-color .2s;
+        }
+        .login-card textarea:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .login-card .btn { width: 100%; justify-content: center; margin-top: 18px; padding: 12px; font-size: .95rem; }
+
+        .error-msg {
+            background: rgba(255,77,109,.12);
+            border: 1px solid var(--danger);
+            color: var(--danger);
+            border-radius: 8px;
+            padding: 10px 14px;
+            font-size: .85rem;
+            margin-top: 14px;
+            display: none;
+        }
+
+        /* ───────────── Dashboard ───────────── */
+        .dashboard { display: none; width: 100%; max-width: 1100px; padding: 28px 24px 60px; }
+
+        .stats-row {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 24px;
+        }
+        .stat-card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 20px 22px;
+        }
+        .stat-card .label { font-size: .75rem; text-transform: uppercase; letter-spacing: .5px; color: var(--muted); margin-bottom: 6px; }
+        .stat-card .value { font-size: 1.6rem; font-weight: 700; }
+        .stat-card .value.green { color: var(--accent2); }
+        .stat-card .value.purple { color: var(--accent); }
+
+        /* ─── Search ─── */
+        .toolbar {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+        .search-box {
+            flex: 1;
+            min-width: 220px;
+            padding: 10px 14px 10px 38px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text);
+            font-size: .9rem;
+            transition: border-color .2s;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%238b8fa3' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z'/%3E%3C/svg%3E");
+            background-repeat: no-repeat;
+            background-position: 12px center;
+        }
+        .search-box:focus { outline: none; border-color: var(--accent); }
+
+        /* ─── Table ─── */
+        .table-wrap {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+        table { width: 100%; border-collapse: collapse; }
+        thead th {
+            background: var(--card);
+            color: var(--muted);
+            font-size: .75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: .5px;
+            padding: 14px 18px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+            position: sticky;
+            top: 0;
+        }
+        tbody tr { transition: background .15s; }
+        tbody tr:hover { background: rgba(108,99,255,.06); }
+        tbody td {
+            padding: 14px 18px;
+            font-size: .9rem;
+            border-bottom: 1px solid var(--border);
+            vertical-align: middle;
+        }
+        tbody tr:last-child td { border-bottom: none; }
+
+        .machine-id {
+            font-family: 'Cascadia Code', 'Fira Code', monospace;
+            font-size: .82rem;
+            color: var(--accent);
+            word-break: break-all;
+        }
+
+        .pass-cell {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .pass-value {
+            font-family: 'Cascadia Code', 'Fira Code', monospace;
+            font-size: 1.05rem;
+            font-weight: 700;
+            letter-spacing: 3px;
+            color: var(--accent2);
+            background: rgba(0,201,167,.08);
+            padding: 4px 12px;
+            border-radius: 6px;
+            user-select: all;
+        }
+        .copy-btn {
+            background: none;
+            border: none;
+            color: var(--muted);
+            cursor: pointer;
+            font-size: 1rem;
+            padding: 4px;
+            border-radius: 4px;
+            transition: color .2s;
+        }
+        .copy-btn:hover { color: var(--text); }
+        .copy-btn.copied { color: var(--accent2); }
+
+        .time-cell {
+            font-size: .82rem;
+            color: var(--muted);
+        }
+        .time-cell .relative {
+            display: block;
+            font-size: .75rem;
+            margin-top: 2px;
+            color: var(--accent);
+        }
+
+        .status-dot {
+            display: inline-block;
+            width: 8px; height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+        .status-dot.online  { background: var(--accent2); box-shadow: 0 0 6px var(--accent2); }
+        .status-dot.stale   { background: #f0a500; box-shadow: 0 0 6px #f0a500; }
+        .status-dot.offline { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+
+        .no-data {
+            text-align: center;
+            padding: 60px 20px;
+            color: var(--muted);
+            font-size: .95rem;
+        }
+
+        /* ─── Auto-refresh indicator ─── */
+        .refresh-indicator {
+            font-size: .8rem;
+            color: var(--muted);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .refresh-indicator .dot {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+            background: var(--accent2);
+            animation: pulse 2s infinite;
+        }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+        /* ─── Toast ─── */
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 12px 20px;
+            font-size: .85rem;
+            box-shadow: var(--shadow);
+            transform: translateY(120%);
+            transition: transform .3s ease;
+            z-index: 999;
+        }
+        .toast.show { transform: translateY(0); }
+
+        /* ─── Spinner ─── */
+        .spinner {
+            width: 20px; height: 20px;
+            border: 2px solid var(--border);
+            border-top-color: var(--accent);
+            border-radius: 50%;
+            animation: spin .6s linear infinite;
+            display: inline-block;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* ─── Responsive ─── */
+
+        /* Tablet */
+        @media (max-width: 900px) {
+            .dashboard { padding: 20px 16px 60px; }
+        }
+
+        /* Mobile */
+        @media (max-width: 640px) {
+            /* Header — stack title above actions */
+            header {
+                padding: 12px 16px;
+                flex-direction: column;
+                align-items: stretch;
+                gap: 10px;
+            }
+            header h1 { font-size: 1rem; justify-content: center; }
+            .header-actions {
+                justify-content: center;
+                gap: 8px;
+                flex-wrap: wrap;
+            }
+            .refresh-indicator #refreshStatus { display: none; }
+            .btn { padding: 8px 14px; font-size: .8rem; }
+
+            /* Login */
+            .login-wrapper { padding: 24px 16px; align-items: flex-start; padding-top: 40px; }
+            .login-card { padding: 24px 18px; border-radius: 10px; }
+            .login-card h2 { font-size: 1.15rem; }
+            .login-card p.sub { font-size: .82rem; }
+
+            /* Dashboard */
+            .dashboard { padding: 16px 14px 70px; }
+
+            /* Stats — 3 equal columns */
+            .stats-row {
+                grid-template-columns: repeat(3, 1fr);
+                gap: 8px;
+                margin-bottom: 16px;
+            }
+            .stat-card {
+                padding: 12px 10px;
+                text-align: center;
+            }
+            .stat-card .label { font-size: .65rem; letter-spacing: .3px; margin-bottom: 4px; }
+            .stat-card .value { font-size: 1.15rem; }
+
+            /* Toolbar — stack vertically */
+            .toolbar {
+                flex-direction: column;
+                gap: 8px;
+            }
+            .search-box {
+                width: 100%;
+                min-width: 0;
+                font-size: .85rem;
+                padding: 10px 12px 10px 36px;
+            }
+            .toolbar .btn {
+                width: 100%;
+                justify-content: center;
+                padding: 10px;
+            }
+
+            /* ── Card-style table on mobile ── */
+            .table-wrap {
+                background: transparent;
+                border: none;
+                border-radius: 0;
+                overflow: visible;
+            }
+            table  { display: block; }
+            thead  { display: none; }
+            tbody  { display: flex; flex-direction: column; gap: 12px; }
+            tbody tr {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                grid-template-rows: auto auto auto;
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: var(--radius);
+                padding: 0;
+                overflow: hidden;
+            }
+            tbody tr:hover { background: rgba(108,99,255,.06); }
+            tbody td {
+                display: flex;
+                flex-direction: column;
+                align-items: flex-start;
+                padding: 10px 14px;
+                border-bottom: none;
+                font-size: .85rem;
+                gap: 3px;
+                min-height: 0;
+            }
+            /* Row number column — hidden on mobile */
+            tbody td[data-label="#"] { display: none; }
+            /* Label shown above value */
+            tbody td::before {
+                content: attr(data-label);
+                font-size: .6rem;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: .7px;
+                color: var(--muted);
+                white-space: nowrap;
+                margin-bottom: 2px;
+            }
+
+            /* Machine ID — spans full width as card header */
+            tbody td[data-label="Machine ID"] {
+                grid-column: 1 / -1;
+                background: var(--card);
+                border-bottom: 1px solid var(--border);
+                padding: 12px 14px;
+            }
+            .machine-id {
+                font-size: .76rem;
+                text-align: left;
+                word-break: break-all;
+                width: 100%;
+            }
+
+            /* Password — left column */
+            tbody td[data-label="Password"] {
+                grid-column: 1;
+                grid-row: 2;
+                border-right: 1px solid var(--border);
+            }
+            .pass-cell {
+                width: 100%;
+                justify-content: flex-start;
+            }
+            .pass-value { font-size: .95rem; letter-spacing: 2px; padding: 3px 8px; }
+
+            /* Status — right column, same row as password */
+            tbody td[data-label="Status"] {
+                grid-column: 2;
+                grid-row: 2;
+                flex-direction: row;
+                align-items: flex-start;
+                flex-wrap: wrap;
+                gap: 3px;
+            }
+            tbody td[data-label="Status"]::before {
+                width: 100%;
+            }
+
+            /* Last Updated — spans full width as footer */
+            tbody td[data-label="Last Updated"] {
+                grid-column: 1 / -1;
+                grid-row: 3;
+                border-top: 1px solid var(--border);
+                flex-direction: row;
+                align-items: center;
+                gap: 8px;
+                padding: 8px 14px;
+                background: rgba(0,0,0,.1);
+            }
+            tbody td[data-label="Last Updated"]::before {
+                margin-bottom: 0;
+            }
+            .time-cell { text-align: left; width: auto; font-size: .78rem; }
+            .time-cell .relative { display: inline; margin-top: 0; margin-left: 4px; font-size: .72rem; }
+
+            /* Toast full-width */
+            .toast { left: 14px; right: 14px; bottom: 14px; text-align: center; }
+        }
+
+        /* Very small phones (< 380px) */
+        @media (max-width: 380px) {
+            .stats-row { grid-template-columns: 1fr 1fr; }
+            .stat-card:last-child { grid-column: 1 / -1; }
+            header h1 .icon { display: none; }
+            header h1 { font-size: .9rem; }
+            .login-card { padding: 20px 14px; }
+        }
+    </style>
+</head>
+<body>
+    <!-- ═══════════ HEADER ═══════════ -->
+    <header>
+        <h1><span class="icon">🔒</span> SecureDesktopLock Dashboard</h1>
+        <div class="header-actions" id="headerActions" style="display:none;">
+            <div class="refresh-indicator">
+                <span class="dot"></span>
+                <span id="refreshStatus">Auto-refresh: 15s</span>
+            </div>
+            <button class="btn btn-outline" onclick="fetchMachines()" title="Refresh now">⟳ Refresh</button>
+            <button class="btn btn-danger" onclick="logout()">Logout</button>
+        </div>
+    </header>
+
+    <!-- ═══════════ LOGIN ═══════════ -->
+    <div class="login-wrapper" id="loginPanel">
+        <div class="login-card">
+            <h2>🔑 Firebase Login</h2>
+            <p class="sub">Enter your Firebase JSON configuration to connect to the Realtime Database.</p>
+
+            <label for="configInput">Firebase Config (JSON)</label>
+            <textarea id="configInput" spellcheck="false" placeholder='{
+  "base_path":   "https://your-project.firebaseio.com/",
+  "auth_secret": "your-database-secret"
+}'></textarea>
+
+            <button class="btn btn-primary" id="connectBtn" onclick="connect()">
+                Connect
+            </button>
+
+            <div class="error-msg" id="loginError"></div>
+        </div>
+    </div>
+
+    <!-- ═══════════ DASHBOARD ═══════════ -->
+    <div class="dashboard" id="dashboard">
+        <!-- Stats -->
+        <div class="stats-row">
+            <div class="stat-card">
+                <div class="label">Total Machines</div>
+                <div class="value purple" id="statTotal">—</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Online (updated &lt; 1 hour)</div>
+                <div class="value green" id="statOnline">—</div>
+            </div>
+            <div class="stat-card">
+                <div class="label">Last Refreshed</div>
+                <div class="value" id="statLastRefresh" style="font-size:1rem;">—</div>
+            </div>
+        </div>
+
+        <!-- Toolbar -->
+        <div class="toolbar">
+            <input class="search-box" type="text" id="searchInput" placeholder="Search by Machine ID or Password..." oninput="renderTable()" />
+            <button class="btn btn-outline" onclick="exportCSV()">📥 Export CSV</button>
+        </div>
+
+        <!-- Table -->
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:40px">#</th>
+                        <th>Machine ID</th>
+                        <th>Current Password</th>
+                        <th>Last Updated</th>
+                        <th>Status</th>
+                    </tr>
+                </thead>
+                <tbody id="machineTableBody">
+                    <tr><td colspan="5" class="no-data">Loading data…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <!-- ═══════════ SCRIPT ═══════════ -->
+    <script>
+    (() => {
+        'use strict';
+
+        // ──── State ────
+        let config    = null;   // { base_path, auth_secret }
+        let machines  = [];     // [{ id, current_password, last_updated }]
+        let refreshId = null;
+        const REFRESH_INTERVAL = 15_000; // 15 seconds
+
+        // ──── DOM refs ────
+        const $ = id => document.getElementById(id);
+
+        // ──────────────────────────────────────────────
+        //  LOGIN
+        // ──────────────────────────────────────────────
+        window.connect = async function () {
+            const raw = $('configInput').value.trim();
+            const errEl = $('loginError');
+            errEl.style.display = 'none';
+
+            if (!raw) return showLoginError('Please enter the JSON configuration.');
+
+            let parsed;
+            try { parsed = JSON.parse(raw); }
+            catch { return showLoginError('Invalid JSON. Please check the syntax.'); }
+
+            if (!parsed.base_path)   return showLoginError('Missing required field "base_path".');
+            if (!parsed.auth_secret) return showLoginError('Missing required field "auth_secret".');
+
+            // Normalise trailing slash
+            if (!parsed.base_path.endsWith('/')) parsed.base_path += '/';
+
+            config = parsed;
+            $('connectBtn').disabled = true;
+            $('connectBtn').innerHTML = '<span class="spinner"></span> Connecting…';
+
+            try {
+                await fetchMachines();
+                // Success → switch UI
+                $('loginPanel').style.display  = 'none';
+                $('dashboard').style.display   = 'block';
+                $('headerActions').style.display = 'flex';
+
+                // Save to localStorage so user doesn't have to re-enter
+                localStorage.setItem('fb_config', JSON.stringify(config));
+
+                startAutoRefresh();
+            } catch (err) {
+                showLoginError('Failed to connect to Firebase: ' + err.message);
+            } finally {
+                $('connectBtn').disabled = false;
+                $('connectBtn').innerHTML = 'Connect';
+            }
+        };
+
+        function showLoginError(msg) {
+            const el = $('loginError');
+            el.textContent = msg;
+            el.style.display = 'block';
+        }
+
+        // ──────────────────────────────────────────────
+        //  LOGOUT
+        // ──────────────────────────────────────────────
+        window.logout = function () {
+            stopAutoRefresh();
+            config = null;
+            machines = [];
+            localStorage.removeItem('fb_config');
+            $('loginPanel').style.display  = 'flex';
+            $('dashboard').style.display   = 'none';
+            $('headerActions').style.display = 'none';
+        };
+
+        // ──────────────────────────────────────────────
+        //  FETCH ALL MACHINES
+        // ──────────────────────────────────────────────
+        window.fetchMachines = async function () {
+            const url = `${config.base_path}machines.json?auth=${config.auth_secret}`;
+            const res = await fetch(url);
+
+            if (!res.ok) {
+                const body = await res.text();
+                throw new Error(`HTTP ${res.status}: ${body}`);
+            }
+
+            const data = await res.json();
+            machines = [];
+
+            if (data && typeof data === 'object') {
+                for (const [id, value] of Object.entries(data)) {
+                    if (id === '__ping__') continue; // skip ping node
+                    machines.push({
+                        id,
+                        current_password: value?.current_password ?? '—',
+                        last_updated:     value?.last_updated     ?? null
+                    });
+                }
+            }
+
+            // Sort by last_updated descending (most recent first)
+            machines.sort((a, b) => {
+                if (!a.last_updated) return 1;
+                if (!b.last_updated) return -1;
+                return new Date(b.last_updated) - new Date(a.last_updated);
+            });
+
+            updateStats();
+            renderTable();
+            $('statLastRefresh').textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
+        };
+
+        // ──────────────────────────────────────────────
+        //  RENDER TABLE
+        // ──────────────────────────────────────────────
+        window.renderTable = function () {
+            const tbody = $('machineTableBody');
+            const query = ($('searchInput').value || '').toLowerCase();
+
+            const filtered = machines.filter(m =>
+                m.id.toLowerCase().includes(query) ||
+                m.current_password.toLowerCase().includes(query)
+            );
+
+            if (filtered.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="5" class="no-data">No machines found.</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = filtered.map((m, i) => {
+                const status = getStatus(m.last_updated);
+                return `
+                <tr>
+                    <td data-label="#" style="color:var(--muted)">${i + 1}</td>
+                    <td data-label="Machine ID" class="machine-id">${esc(m.id)}</td>
+                    <td data-label="Password">
+                        <div class="pass-cell">
+                            <span class="pass-value">${esc(m.current_password)}</span>
+                            <button class="copy-btn" onclick="copyPass(this, '${esc(m.current_password)}')" title="Copy">📋</button>
+                        </div>
+                    </td>
+                    <td data-label="Last Updated" class="time-cell">
+                        ${m.last_updated ? formatTime(m.last_updated) : '—'}
+                        ${m.last_updated ? `<span class="relative">${timeAgo(m.last_updated)}</span>` : ''}
+                    </td>
+                    <td data-label="Status">
+                        <span class="status-dot ${status.cls}"></span>${status.label}
+                    </td>
+                </tr>`;
+            }).join('');
+        };
+
+        // ──────────────────────────────────────────────
+        //  STATS
+        // ──────────────────────────────────────────────
+        function updateStats() {
+            $('statTotal').textContent  = machines.length;
+            const onlineCount = machines.filter(m => {
+                if (!m.last_updated) return false;
+                return (Date.now() - new Date(m.last_updated).getTime()) < 3_600_000;
+            }).length;
+            $('statOnline').textContent = onlineCount;
+        }
+
+        // ──────────────────────────────────────────────
+        //  STATUS HELPER
+        // ──────────────────────────────────────────────
+        function getStatus(lastUpdated) {
+            if (!lastUpdated) return { cls: 'offline', label: 'No data' };
+            const diff = Date.now() - new Date(lastUpdated).getTime();
+            if (diff < 3_600_000)       return { cls: 'online',  label: 'Online' };
+            if (diff < 86_400_000)      return { cls: 'stale',   label: 'Stale (< 24h)' };
+            return                             { cls: 'offline', label: 'Offline' };
+        }
+
+        // ──────────────────────────────────────────────
+        //  TIME HELPERS
+        // ──────────────────────────────────────────────
+        function formatTime(iso) {
+            try {
+                const d = new Date(iso);
+                return d.toLocaleString('en-US', { hour12: false });
+            } catch { return iso; }
+        }
+
+        function timeAgo(iso) {
+            const diff = Date.now() - new Date(iso).getTime();
+            const sec = Math.floor(diff / 1000);
+            if (sec < 60)   return `${sec} second${sec !== 1 ? 's' : ''} ago`;
+            const min = Math.floor(sec / 60);
+            if (min < 60)   return `${min} minute${min !== 1 ? 's' : ''} ago`;
+            const hr  = Math.floor(min / 60);
+            if (hr < 24)    return `${hr} hour${hr !== 1 ? 's' : ''} ago`;
+            const day = Math.floor(hr / 24);
+            return `${day} day${day !== 1 ? 's' : ''} ago`;
+        }
+
+        // ──────────────────────────────────────────────
+        //  COPY PASSWORD
+        // ──────────────────────────────────────────────
+        window.copyPass = async function (btn, text) {
+            try {
+                await navigator.clipboard.writeText(text);
+                btn.classList.add('copied');
+                btn.textContent = '✓';
+                showToast('Password copied!');
+                setTimeout(() => { btn.classList.remove('copied'); btn.textContent = '📋'; }, 1500);
+            } catch {
+                showToast('Could not copy to clipboard.');
+            }
+        };
+
+        // ──────────────────────────────────────────────
+        //  EXPORT CSV
+        // ──────────────────────────────────────────────
+        window.exportCSV = function () {
+            if (machines.length === 0) return showToast('No data to export.');
+            const header = 'Machine ID,Current Password,Last Updated,Status\n';
+            const rows = machines.map(m => {
+                const s = getStatus(m.last_updated);
+                return `"${m.id}","${m.current_password}","${m.last_updated ?? ''}","${s.label}"`;
+            }).join('\n');
+            const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8;' });
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `machines_${new Date().toISOString().slice(0,10)}.csv`;
+            a.click();
+            showToast('CSV downloaded successfully.');
+        };
+
+        // ──────────────────────────────────────────────
+        //  AUTO REFRESH
+        // ──────────────────────────────────────────────
+        function startAutoRefresh() {
+            stopAutoRefresh();
+            refreshId = setInterval(async () => {
+                try { await fetchMachines(); }
+                catch (err) { console.warn('Auto-refresh failed:', err); }
+            }, REFRESH_INTERVAL);
+        }
+        function stopAutoRefresh() {
+            if (refreshId) { clearInterval(refreshId); refreshId = null; }
+        }
+
+        // ──────────────────────────────────────────────
+        //  TOAST
+        // ──────────────────────────────────────────────
+        function showToast(msg) {
+            const t = $('toast');
+            t.textContent = msg;
+            t.classList.add('show');
+            setTimeout(() => t.classList.remove('show'), 2500);
+        }
+
+        // ──────────────────────────────────────────────
+        //  UTILITIES
+        // ──────────────────────────────────────────────
+        function esc(s) {
+            const d = document.createElement('div');
+            d.textContent = s;
+            return d.innerHTML;
+        }
+
+        // ──────────────────────────────────────────────
+        //  RESTORE SESSION
+        // ──────────────────────────────────────────────
+        (function tryRestore() {
+            const saved = localStorage.getItem('fb_config');
+            if (saved) {
+                try {
+                    config = JSON.parse(saved);
+                    $('configInput').value = saved;
+                    $('loginPanel').style.display  = 'none';
+                    $('dashboard').style.display   = 'block';
+                    $('headerActions').style.display = 'flex';
+                    fetchMachines();
+                    startAutoRefresh();
+                } catch { /* ignore */ }
+            }
+        })();
+
+    })();
+    </script>
+</body>
+</html>

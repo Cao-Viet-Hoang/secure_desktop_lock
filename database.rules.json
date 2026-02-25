@@ -1,0 +1,22 @@
+{
+  "rules": {
+    "machines": {
+      "$machineId": {
+        ".read":  "auth != null",
+
+        ".write": "auth != null",
+
+        "$field": {
+          ".validate": "$field === 'current_password' || $field === 'last_updated'"
+        },
+
+        "current_password": {
+          ".validate": "newData.isString() && newData.val().length > 0"
+        },
+        "last_updated": {
+          ".validate": "newData.isString() && newData.val().length > 0"
+        }
+      }
+    }
+  }
+}
