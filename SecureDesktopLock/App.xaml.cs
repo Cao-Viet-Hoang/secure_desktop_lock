@@ -105,6 +105,9 @@ namespace SecureDesktopLock
         private Thread _watchdogThread;
         private bool _appExiting = false;
 
+        // Active lock window (null when screen is unlocked)
+        private LockWindow _activeLockWindow;
+
         // ------------------------------------------------------------------ //
         //  Application_Startup                                               //
         // ------------------------------------------------------------------ //
@@ -181,7 +184,13 @@ namespace SecureDesktopLock
             _keyboardHook = new KeyboardHookService();
             _keyboardHook.Start();
 
-            // ── 7. Show lock window ───────────────────────────────────────
+            // ── 7. Power / session event hooks ───────────────────────────
+            // Resume from sleep/hibernate → re-lock immediately.
+            SystemEvents.PowerModeChanged += OnPowerModeChanged;
+            // Windows session unlock (Win+L then re-login) → re-lock.
+            SystemEvents.SessionSwitch += OnSessionSwitch;
+
+            // ── 8. Show lock window ───────────────────────────────────────
             ShowLockWindow(IsDevMode());
         }
 
@@ -192,6 +201,10 @@ namespace SecureDesktopLock
         private void Application_Exit(object sender, ExitEventArgs e)
         {
             _appExiting = true;
+
+            // Unsubscribe power / session events
+            SystemEvents.PowerModeChanged -= OnPowerModeChanged;
+            SystemEvents.SessionSwitch -= OnSessionSwitch;
 
             _keyboardHook?.Stop();
             _keyboardHook?.Dispose();
@@ -217,6 +230,13 @@ namespace SecureDesktopLock
 
         private void ShowLockWindow(bool devMode = false)
         {
+            // Guard: never open a second lock window while one is already visible.
+            if (_activeLockWindow != null && _activeLockWindow.IsVisible)
+            {
+                _activeLockWindow.Activate();
+                return;
+            }
+
             FirebaseService fs = _firebaseService
                 ?? new NullFirebaseService();
 
@@ -228,18 +248,53 @@ namespace SecureDesktopLock
 
             LockWindow lockWindow = new LockWindow();
             lockWindow.SetViewModel(viewModel);
+            _activeLockWindow = lockWindow;
 
-            // When the lock window closes, shut down the application so the
-            // watchdog does not immediately relaunch the lock.
+            // After a successful unlock the window closes.
+            // Do NOT call Shutdown() here — keep the process alive so that
+            // sleep/resume and session-unlock events can re-lock automatically.
             lockWindow.Closed += (_, __) =>
             {
-                Logger.LogInfo("LockWindow closed — shutting down application.");
-                _appExiting = true;
-                Shutdown(0);
+                Logger.LogInfo("LockWindow closed — screen unlocked, app staying resident.");
+                _activeLockWindow = null;
+                _appExiting = true;   // pause watchdog while unlocked
             };
 
             MainWindow = lockWindow;
+            _appExiting = false;  // watchdog active while lock is shown
             lockWindow.Show();
+        }
+
+        // ------------------------------------------------------------------ //
+        //  Power & session event handlers                                    //
+        // ------------------------------------------------------------------ //
+
+        /// <summary>
+        /// Fired by Windows when the system suspends or resumes.
+        /// On <see cref="PowerModes.Resume"/> we immediately re-show the lock
+        /// window so the screen is secured the moment the user sits back down.
+        /// </summary>
+        private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+        {
+            if (e.Mode == PowerModes.Resume)
+            {
+                Logger.LogInfo("System resumed from sleep/hibernate — re-locking screen.");
+                Dispatcher.Invoke(() => ShowLockWindow(IsDevMode()));
+            }
+        }
+
+        /// <summary>
+        /// Fired when the Windows session is locked or unlocked (Win+L etc.).
+        /// On <see cref="SessionSwitchReason.SessionUnlock"/> we re-show our
+        /// lock window so the user must authenticate through our app as well.
+        /// </summary>
+        private void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+        {
+            if (e.Reason == SessionSwitchReason.SessionUnlock)
+            {
+                Logger.LogInfo("Windows session unlocked — re-locking screen.");
+                Dispatcher.Invoke(() => ShowLockWindow(IsDevMode()));
+            }
         }
 
         // ------------------------------------------------------------------ //
