@@ -135,33 +135,6 @@
     <!-- ================================================================ -->
     <Grid Background="{StaticResource BackgroundBrush}">
 
-        <!-- ============================================================ -->
-        <!-- DEV MODE banner — visible only in dev/debug builds           -->
-        <!-- ============================================================ -->
-        <Border
-            VerticalAlignment="Top"
-            HorizontalAlignment="Stretch"
-            Background="#CC2A1F00"
-            BorderBrush="#FFB300"
-            BorderThickness="0,0,0,2"
-            Padding="0,10"
-            Visibility="{Binding IsDevMode, Converter={StaticResource BoolToVisibilityConverter}}">
-            <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                <TextBlock Text="⚠" FontSize="16" Foreground="#FFB300"
-                           VerticalAlignment="Center" Margin="0,0,8,0"/>
-                <TextBlock FontSize="13" Foreground="#FFB300" FontWeight="Bold"
-                           VerticalAlignment="Center">
-                    <Run Text="DEV MODE"/>
-                    <Run Text="  —  " Foreground="#CC8800"/>
-                    <Run Text="Password: "/>
-                    <Run Text="123456" FontWeight="ExtraBold" Foreground="#FFD54F"/>
-                    <Run Text="   (Firebase disabled)" Foreground="#CC8800" FontSize="11"/>
-                </TextBlock>
-                <TextBlock Text="⚠" FontSize="16" Foreground="#FFB300"
-                           VerticalAlignment="Center" Margin="8,0,0,0"/>
-            </StackPanel>
-        </Border>
-
         <!-- Subtle radial gradient in the centre for depth -->
         <Ellipse
             Width="700" Height="700"

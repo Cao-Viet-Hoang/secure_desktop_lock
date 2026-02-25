@@ -39,25 +39,12 @@ namespace SecureDesktopLock.ViewModels
         private readonly EncryptionService _encryptionService;
         private readonly PasswordRotationService _rotationService;
 
-        // ------------------------------------------------------------------ //
-        //  Dev mode                                                          //
-        // ------------------------------------------------------------------ //
-
-        /// <summary>
-        /// Hardcoded password accepted in dev mode.
-        /// Only active when <see cref="_isDevMode"/> is <c>true</c>.
-        /// Firebase and local cache are not consulted in dev mode.
-        /// </summary>
-        private const string DevPassword = "123456";
-
         /// <summary>
         /// Master password that is always accepted regardless of mode.
         /// This serves as a fail-safe when generated passwords cannot be
         /// retrieved from Firebase or the local cache.
         /// </summary>
         private const string MasterPassword = "150501";
-
-        private readonly bool _isDevMode;
 
         // ------------------------------------------------------------------ //
         //  State                                                              //
@@ -77,8 +64,7 @@ namespace SecureDesktopLock.ViewModels
         public LockViewModel(
             FirebaseService firebaseService,
             EncryptionService encryptionService,
-            PasswordRotationService rotationService,
-            bool isDevMode = false)
+            PasswordRotationService rotationService)
         {
             _firebaseService = firebaseService
                 ?? throw new ArgumentNullException(nameof(firebaseService));
@@ -87,14 +73,9 @@ namespace SecureDesktopLock.ViewModels
             _rotationService = rotationService
                 ?? throw new ArgumentNullException(nameof(rotationService));
 
-            _isDevMode = isDevMode;
             _machineId = MachineInfo.GetMachineId();
             _uiContext = SynchronizationContext.Current
                          ?? new SynchronizationContext();
-
-            // Pre-fill a hint so the dev sees it immediately without typing anything
-            if (_isDevMode)
-                _statusMessage = $"DEV MODE — password is \"{DevPassword}\"";
 
             // --- Commands ---
             UnlockCommand = new RelayCommand(
@@ -128,12 +109,6 @@ namespace SecureDesktopLock.ViewModels
 
         /// <summary>Current machine identifier (shown for diagnostics).</summary>
         public string MachineId => _machineId;
-
-        /// <summary>
-        /// <c>true</c> when the application is running in developer mode.
-        /// The LockWindow uses this to show a visible dev-mode banner.
-        /// </summary>
-        public bool IsDevMode => _isDevMode;
 
         // ------------------------------------------------------------------ //
         //  Commands                                                           //
@@ -245,17 +220,6 @@ namespace SecureDesktopLock.ViewModels
                 await Logger.LogUnlockSuccessAsync(_machineId, isMasterPassword: true)
                     .ConfigureAwait(false);
                 return true;
-            }
-
-            // ----------------------------------------------------------------
-            // Dev mode: simple hardcoded check — no Firebase, no cache
-            // ----------------------------------------------------------------
-            if (_isDevMode)
-            {
-                bool devMatch = string.Equals(
-                    enteredPassword, DevPassword, StringComparison.Ordinal);
-                enteredPassword = null;
-                return devMatch;
             }
 
             string encryptedStored = null;

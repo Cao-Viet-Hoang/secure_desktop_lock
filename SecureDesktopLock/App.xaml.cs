@@ -6,7 +6,6 @@ using SecureDesktopLock.Utils;
 using SecureDesktopLock.ViewModels;
 using System;
 using System.Diagnostics;
-using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Windows;
@@ -36,51 +35,6 @@ namespace SecureDesktopLock
     /// </summary>
     public partial class App : Application
     {
-        // ------------------------------------------------------------------ //
-        //  Developer-mode bypass                                              //
-        // ------------------------------------------------------------------ //
-
-        /// <summary>
-        /// CLI argument that disables the lock.  Pass on the command line or
-        /// set as the VS Debug launch argument:  Project → Properties → Debug
-        /// → Application arguments → <c>--nolock</c>
-        /// </summary>
-        private const string DevArg = "--nolock";
-
-        /// <summary>
-        /// Environment variable override.  Set in system/user env vars or in
-        /// the launchSettings / batch scripts used by the dev team.
-        /// </summary>
-        private const string DevEnvVar = "SECURELOCK_DEV";
-
-        /// <summary>
-        /// Returns <c>true</c> when the app should run in developer mode.
-        /// In dev mode the lock window is shown normally but the password
-        /// is hardcoded to <c>"123456"</c> so no Firebase configuration is
-        /// needed and the full UI/unlock flow can be exercised.
-        ///
-        /// Three independent signals are checked — any one is sufficient:
-        /// <list type="bullet">
-        ///   <item><c>#if DEBUG</c> — Debug build configuration.</item>
-        ///   <item><c>--nolock</c> CLI argument — Release build testing.</item>
-        ///   <item><c>SECURELOCK_DEV=1</c> environment variable — CI / RDP.</item>
-        /// </list>
-        /// </summary>
-        private static bool IsDevMode()
-        {
-            // CLI argument: SecureDesktopLock.exe --nolock
-            bool hasArg = Environment.GetCommandLineArgs()
-                .Any(a => string.Equals(a, DevArg, StringComparison.OrdinalIgnoreCase));
-            if (hasArg) return true;
-
-            // Environment variable: SECURELOCK_DEV=1  (any non-empty value works)
-            string envVal = Environment.GetEnvironmentVariable(DevEnvVar);
-            if (!string.IsNullOrWhiteSpace(envVal) && envVal.Trim() != "0")
-                return true;
-
-            return false;
-        }
-
         // ------------------------------------------------------------------ //
         //  Single-instance mutex name (must be globally unique)              //
         // ------------------------------------------------------------------ //
@@ -115,12 +69,6 @@ namespace SecureDesktopLock
         private void Application_Startup(object sender, StartupEventArgs e)
         {
             Logger.LogInfo("Application starting.");
-
-            // ── 0. Log dev mode (informational only) ─────────────────────
-            // Dev mode does NOT skip the lock — it runs the full app but uses
-            // the hardcoded password "123456" instead of Firebase.
-            if (IsDevMode())
-                Logger.LogInfo("DEV MODE active — password is \"123456\".");
 
             // ── 1. Single-instance guard ──────────────────────────────────
             _singleInstanceMutex = new Mutex(
@@ -174,7 +122,6 @@ namespace SecureDesktopLock
             // If this machine has no password record in Firebase yet, generate
             // one and upload it automatically.  Runs in the background so the
             // lock window appears immediately without waiting for the network.
-            if (!IsDevMode())
             {
                 string machineId = MachineInfo.GetMachineId();
                 _ = _rotationService.EnsurePasswordExistsAsync(machineId);
@@ -191,7 +138,7 @@ namespace SecureDesktopLock
             SystemEvents.SessionSwitch += OnSessionSwitch;
 
             // ── 8. Show lock window ───────────────────────────────────────
-            ShowLockWindow(IsDevMode());
+            ShowLockWindow();
         }
 
         // ------------------------------------------------------------------ //
@@ -228,7 +175,7 @@ namespace SecureDesktopLock
         //  Lock window                                                       //
         // ------------------------------------------------------------------ //
 
-        private void ShowLockWindow(bool devMode = false)
+        private void ShowLockWindow()
         {
             // Guard: never open a second lock window while one is already visible.
             if (_activeLockWindow != null && _activeLockWindow.IsVisible)
@@ -243,16 +190,14 @@ namespace SecureDesktopLock
             LockViewModel viewModel = new LockViewModel(
                 fs,
                 _encryptionService,
-                _rotationService,
-                isDevMode: devMode);
+                _rotationService);
 
             LockWindow lockWindow = new LockWindow();
             lockWindow.SetViewModel(viewModel);
             _activeLockWindow = lockWindow;
 
             // After a successful unlock the window closes.
-            // Do NOT call Shutdown() here — keep the process alive so that
-            // sleep/resume and session-unlock events can re-lock automatically.
+            // Stay resident so sleep/resume events can re-lock the screen.
             lockWindow.Closed += (_, __) =>
             {
                 Logger.LogInfo("LockWindow closed — screen unlocked, app staying resident.");
@@ -279,7 +224,7 @@ namespace SecureDesktopLock
             if (e.Mode == PowerModes.Resume)
             {
                 Logger.LogInfo("System resumed from sleep/hibernate — re-locking screen.");
-                Dispatcher.Invoke(() => ShowLockWindow(IsDevMode()));
+                Dispatcher.Invoke(() => ShowLockWindow());
             }
         }
 
@@ -293,7 +238,7 @@ namespace SecureDesktopLock
             if (e.Reason == SessionSwitchReason.SessionUnlock)
             {
                 Logger.LogInfo("Windows session unlocked — re-locking screen.");
-                Dispatcher.Invoke(() => ShowLockWindow(IsDevMode()));
+                Dispatcher.Invoke(() => ShowLockWindow());
             }
         }
 
