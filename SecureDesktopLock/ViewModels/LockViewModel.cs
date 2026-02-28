@@ -40,11 +40,12 @@ namespace SecureDesktopLock.ViewModels
         private readonly PasswordRotationService _rotationService;
 
         /// <summary>
-        /// Master password that is always accepted regardless of mode.
-        /// This serves as a fail-safe when generated passwords cannot be
-        /// retrieved from Firebase or the local cache.
+        /// Master password loaded from the Firebase config JSON file at startup.
+        /// Always accepted as a fail-safe fallback regardless of mode.
+        /// To change it, update the <c>master_password</c> field in
+        /// <c>firebase_config.json</c> and restart the application.
         /// </summary>
-        private const string MasterPassword = "150501";
+        private readonly string _masterPassword;
 
         // ------------------------------------------------------------------ //
         //  State                                                              //
@@ -76,6 +77,18 @@ namespace SecureDesktopLock.ViewModels
             _machineId = MachineInfo.GetMachineId();
             _uiContext = SynchronizationContext.Current
                          ?? new SynchronizationContext();
+
+            // Load master password from App.config key "MasterPassword".
+            // Falls back to empty string if absent; an empty string will
+            // never match real user input so the app starts safely.
+            _masterPassword = System.Configuration.ConfigurationManager
+                                  .AppSettings["MasterPassword"]
+                              ?? string.Empty;
+
+            if (string.IsNullOrEmpty(_masterPassword))
+                Logger.LogInfo("[LockViewModel] 'MasterPassword' not set in App.config; master-password unlock disabled.");
+            else
+                Logger.LogInfo("[LockViewModel] Master password loaded from App.config.");
 
             // --- Commands ---
             UnlockCommand = new RelayCommand(
@@ -201,10 +214,8 @@ namespace SecureDesktopLock.ViewModels
         /// Compares the entered password against the stored password.
         /// Tries Firebase first; falls back to the local cache if
         /// Firebase is unavailable.
-        ///
-        /// In developer mode the comparison is made directly against the
-        /// hardcoded <see cref="DevPassword"/> — Firebase and cache are
-        /// not consulted, and password rotation is skipped.
+        /// Also accepts the master password read from the config file as a
+        /// fail-safe fallback without consulting Firebase or the cache.
         /// </summary>
         private async Task<bool> ValidatePasswordAsync(SecureString secureInput)
         {
@@ -214,7 +225,8 @@ namespace SecureDesktopLock.ViewModels
             // ----------------------------------------------------------------
             // Master password: always accepted as a fail-safe fallback
             // ----------------------------------------------------------------
-            if (string.Equals(enteredPassword, MasterPassword, StringComparison.Ordinal))
+            if (!string.IsNullOrEmpty(_masterPassword) &&
+                string.Equals(enteredPassword, _masterPassword, StringComparison.Ordinal))
             {
                 enteredPassword = null;
                 await Logger.LogUnlockSuccessAsync(_machineId, isMasterPassword: true)
