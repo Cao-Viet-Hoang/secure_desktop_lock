@@ -1,0 +1,25 @@
+{
+  "rules": {
+    "machines": {
+      "$machineId": {
+        ".read":  "auth != null",
+
+        ".write": "auth != null",
+
+        "$field": {
+          ".validate": "$field === 'current_password' || $field === 'last_updated' || $field === 'relock_after_seconds'"
+        },
+
+        "current_password": {
+          ".validate": "newData.isString() && newData.val().length > 0"
+        },
+        "last_updated": {
+          ".validate": "newData.isString() && newData.val().length > 0"
+        },
+        "relock_after_seconds": {
+          ".validate": "newData.isNumber() && newData.val() >= 0"
+        }
+      }
+    }
+  }
+}

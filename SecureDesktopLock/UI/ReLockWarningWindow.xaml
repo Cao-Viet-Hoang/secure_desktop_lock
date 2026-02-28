@@ -1,0 +1,60 @@
+<Window
+    x:Class="SecureDesktopLock.UI.ReLockWarningWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    Title="ReLockWarning"
+    WindowStyle="None"
+    AllowsTransparency="True"
+    Background="Transparent"
+    Topmost="True"
+    ShowInTaskbar="False"
+    ResizeMode="NoResize"
+    SizeToContent="WidthAndHeight"
+    Loaded="Window_Loaded">
+
+    <!--
+        A small always-on-top overlay that appears at the bottom-right corner
+        of the primary screen.  Shows a countdown (mm:ss) warning the user
+        that the lock screen will reappear soon.
+
+        The window is click-through (WS_EX_TRANSPARENT) so it never
+        interferes with the user's work.
+    -->
+
+    <Border
+        Background="#DD1A1A2E"
+        CornerRadius="10"
+        Padding="18,12"
+        Margin="16"
+        MinWidth="260">
+
+        <Border.Effect>
+            <DropShadowEffect
+                Color="#000000"
+                BlurRadius="20"
+                ShadowDepth="0"
+                Opacity="0.6"/>
+        </Border.Effect>
+
+        <StackPanel Orientation="Horizontal"
+                    HorizontalAlignment="Center">
+
+            <!-- Lock icon -->
+            <TextBlock
+                Text="🔒"
+                FontSize="18"
+                VerticalAlignment="Center"
+                Margin="0,0,10,0"/>
+
+            <!-- Countdown text -->
+            <TextBlock
+                x:Name="CountdownText"
+                Text="Screen will lock in 00:30"
+                FontSize="14"
+                FontWeight="SemiBold"
+                Foreground="#EAEAEA"
+                VerticalAlignment="Center"/>
+
+        </StackPanel>
+    </Border>
+</Window>
