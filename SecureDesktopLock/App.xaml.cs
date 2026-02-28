@@ -54,6 +54,7 @@ namespace SecureDesktopLock
         private FirebaseService _firebaseService;
         private EncryptionService _encryptionService;
         private PasswordRotationService _rotationService;
+        private ReLockService _reLockService;
 
         // Watchdog thread
         private Thread _watchdogThread;
@@ -61,6 +62,9 @@ namespace SecureDesktopLock
 
         // Active lock window (null when screen is unlocked)
         private LockWindow _activeLockWindow;
+
+        // Re-lock warning overlay (null when not shown)
+        private ReLockWarningWindow _warningWindow;
 
         // ------------------------------------------------------------------ //
         //  Application_Startup                                               //
@@ -118,6 +122,11 @@ namespace SecureDesktopLock
 
             _rotationService = new PasswordRotationService(fs, _encryptionService);
 
+            // ── 4b. Re-lock service ───────────────────────────────────────
+            _reLockService = new ReLockService(fs);
+            _reLockService.WarningTick += OnReLockWarningTick;
+            _reLockService.ReLockRequested += OnReLockRequested;
+
             // ── 5. Auto-seed password (fire-and-forget) ───────────────────
             // If this machine has no password record in Firebase yet, generate
             // one and upload it automatically.  Runs in the background so the
@@ -156,6 +165,7 @@ namespace SecureDesktopLock
             _keyboardHook?.Stop();
             _keyboardHook?.Dispose();
 
+            _reLockService?.Dispose();
             _firebaseService?.Dispose();
 
             try
@@ -203,10 +213,19 @@ namespace SecureDesktopLock
                 Logger.LogInfo("LockWindow closed — screen unlocked, app staying resident.");
                 _activeLockWindow = null;
                 _appExiting = true;   // pause watchdog while unlocked
+
+                // Start the auto re-lock countdown
+                string mid = MachineInfo.GetMachineId();
+                _ = _reLockService.StartAsync(mid);
             };
 
             MainWindow = lockWindow;
             _appExiting = false;  // watchdog active while lock is shown
+
+            // Cancel any running re-lock timer (avoid double-trigger)
+            _reLockService?.Cancel();
+            CloseWarningWindow();
+
             lockWindow.Show();
         }
 
@@ -239,6 +258,53 @@ namespace SecureDesktopLock
             {
                 Logger.LogInfo("Windows session unlocked — re-locking screen.");
                 Dispatcher.Invoke(() => ShowLockWindow());
+            }
+        }
+
+        // ------------------------------------------------------------------ //
+        //  Re-lock event handlers                                            //
+        // ------------------------------------------------------------------ //
+
+        /// <summary>
+        /// Called every second during the warning window.
+        /// Shows (or updates) the countdown overlay.
+        /// </summary>
+        private void OnReLockWarningTick(object sender, int secondsRemaining)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                if (_warningWindow == null || !_warningWindow.IsVisible)
+                {
+                    _warningWindow = new ReLockWarningWindow();
+                    _warningWindow.Show();
+                }
+                _warningWindow.UpdateCountdown(secondsRemaining);
+            });
+        }
+
+        /// <summary>
+        /// Called when the re-lock countdown reaches zero.
+        /// Closes the warning overlay and re-shows the lock window.
+        /// </summary>
+        private void OnReLockRequested(object sender, EventArgs e)
+        {
+            Dispatcher.Invoke(() =>
+            {
+                Logger.LogInfo("[ReLock] Timer expired — re-locking screen.");
+                CloseWarningWindow();
+                ShowLockWindow();
+            });
+        }
+
+        /// <summary>
+        /// Closes the warning overlay if it is currently visible.
+        /// </summary>
+        private void CloseWarningWindow()
+        {
+            if (_warningWindow != null)
+            {
+                _warningWindow.Close();
+                _warningWindow = null;
             }
         }
 
@@ -377,6 +443,12 @@ namespace SecureDesktopLock
             string machineId,
             CancellationToken ct = default)
             => System.Threading.Tasks.Task.FromResult<string>(null);
+
+        // Always returns null → field not set (triggers App.config fallback)
+        public override System.Threading.Tasks.Task<int?> GetReLockIntervalAsync(
+            string machineId,
+            CancellationToken ct = default)
+            => System.Threading.Tasks.Task.FromResult<int?>(null);
     }
 }
 

@@ -155,14 +155,16 @@ namespace SecureDesktopLock.Services
                 DateTimeOffset gmt7Time = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
                 string timestamp = gmt7Time.ToString("o");
 
-                var data = new MachinePasswordEntry
-                {
-                    CurrentPassword = encryptedPassword,
-                    LastUpdated = timestamp
-                };
+                // Write each child individually so that sibling keys
+                // (e.g. relock_after_seconds) are never overwritten.
+                // FireSharp's UpdateAsync/SetAsync on the parent node can
+                // replace the entire node depending on the library version.
+                await _client
+                    .SetAsync($"machines/{machineId}/current_password", encryptedPassword)
+                    .ConfigureAwait(false);
 
                 await _client
-                    .SetAsync($"machines/{machineId}", data)
+                    .SetAsync($"machines/{machineId}/last_updated", timestamp)
                     .ConfigureAwait(false);
 
                 Logger.LogInfo($"[FireSharp] Password written for machines/{machineId}.");
@@ -171,6 +173,52 @@ namespace SecureDesktopLock.Services
             {
                 Logger.LogFirebaseError(ex, "FirebaseService.SetPasswordAsync");
                 throw;
+            }
+        }
+
+        /// <summary>
+        /// Reads the <c>relock_after_seconds</c> value for this machine.
+        /// Returns <c>null</c> when the field does not exist (never set),
+        /// <c>0</c> when explicitly set to 0 (disabled), or the positive
+        /// interval in seconds.
+        /// </summary>
+        public virtual async Task<int?> GetReLockIntervalAsync(
+            string machineId,
+            CancellationToken ct = default)
+        {
+            try
+            {
+                var response = await _client
+                    .GetAsync($"machines/{machineId}/relock_after_seconds")
+                    .ConfigureAwait(false);
+
+                string body = response?.Body;
+
+                // Field does not exist in Firebase
+                if (string.IsNullOrWhiteSpace(body) || body == "null")
+                    return null;
+
+                // Firebase may return the value as a bare number (300) or
+                // as a quoted string ("300").  Handle both cases.
+                try
+                {
+                    return response.ResultAs<int>();
+                }
+                catch
+                {
+                    string cleaned = body.Trim().Trim('"');
+                    if (int.TryParse(cleaned, out int parsed))
+                        return parsed;
+
+                    Logger.LogWarning(
+                        $"[FireSharp] Could not parse relock_after_seconds body: '{body}'");
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogFirebaseError(ex, "FirebaseService.GetReLockIntervalAsync");
+                return null;
             }
         }
 

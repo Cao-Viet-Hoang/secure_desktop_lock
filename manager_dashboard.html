@@ -504,6 +504,45 @@
             header h1 { font-size: .9rem; }
             .login-card { padding: 20px 14px; }
         }
+
+        /* ─── Re-lock timer inline editor ─── */
+        .relock-cell {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .relock-input {
+            width: 64px;
+            padding: 4px 8px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: .85rem;
+            text-align: center;
+            transition: border-color .2s;
+        }
+        .relock-input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+        .relock-unit {
+            font-size: .75rem;
+            color: var(--muted);
+        }
+        .relock-save {
+            background: none;
+            border: none;
+            color: var(--accent2);
+            cursor: pointer;
+            font-size: .9rem;
+            padding: 2px 4px;
+            border-radius: 4px;
+            transition: color .2s;
+            display: none;
+        }
+        .relock-save:hover { color: #fff; }
+        .relock-save.visible { display: inline-block; }
     </style>
 </head>
 <body>
@@ -572,12 +611,13 @@
                         <th style="width:40px">#</th>
                         <th>Machine ID</th>
                         <th>Current Password</th>
+                        <th>Re-lock (min)</th>
                         <th>Last Updated</th>
                         <th>Status</th>
                     </tr>
                 </thead>
                 <tbody id="machineTableBody">
-                    <tr><td colspan="5" class="no-data">Loading data…</td></tr>
+                    <tr><td colspan="6" class="no-data">Loading data…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -683,7 +723,8 @@
                     machines.push({
                         id,
                         current_password: value?.current_password ?? '—',
-                        last_updated:     value?.last_updated     ?? null
+                        last_updated:     value?.last_updated     ?? null,
+                        relock_after_seconds: value?.relock_after_seconds ?? 0
                     });
                 }
             }
@@ -713,12 +754,13 @@
             );
 
             if (filtered.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="5" class="no-data">No machines found.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="6" class="no-data">No machines found.</td></tr>';
                 return;
             }
 
             tbody.innerHTML = filtered.map((m, i) => {
                 const status = getStatus(m.last_updated);
+                const relockMin = m.relock_after_seconds > 0 ? Math.round(m.relock_after_seconds / 60) : 0;
                 return `
                 <tr>
                     <td data-label="#" style="color:var(--muted)">${i + 1}</td>
@@ -727,6 +769,17 @@
                         <div class="pass-cell">
                             <span class="pass-value">${esc(m.current_password)}</span>
                             <button class="copy-btn" onclick="copyPass(this, '${esc(m.current_password)}')" title="Copy">📋</button>
+                        </div>
+                    </td>
+                    <td data-label="Re-lock">
+                        <div class="relock-cell">
+                            <input class="relock-input" type="number" min="0" max="1440"
+                                   value="${relockMin}"
+                                   data-machine-id="${esc(m.id)}"
+                                   data-original="${relockMin}"
+                                   oninput="onRelockInputChange(this)" />
+                            <span class="relock-unit">min</span>
+                            <button class="relock-save" onclick="saveRelock(this)" title="Save">✔</button>
                         </div>
                     </td>
                     <td data-label="Last Updated" class="time-cell">
@@ -805,10 +858,10 @@
         // ──────────────────────────────────────────────
         window.exportCSV = function () {
             if (machines.length === 0) return showToast('No data to export.');
-            const header = 'Machine ID,Current Password,Last Updated,Status\n';
+            const header = 'Machine ID,Current Password,Re-lock (seconds),Last Updated,Status\n';
             const rows = machines.map(m => {
                 const s = getStatus(m.last_updated);
-                return `"${m.id}","${m.current_password}","${m.last_updated ?? ''}","${s.label}"`;
+                return `"${m.id}","${m.current_password}","${m.relock_after_seconds ?? 0}","${m.last_updated ?? ''}","${s.label}"`;
             }).join('\n');
             const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8;' });
             const a = document.createElement('a');
@@ -850,6 +903,58 @@
             d.textContent = s;
             return d.innerHTML;
         }
+
+        // ────────────────────────────────────────────────
+        //  RE-LOCK TIMER MANAGEMENT
+        // ────────────────────────────────────────────────
+
+        // Show save button when the re-lock input value changes
+        window.onRelockInputChange = function (input) {
+            const saveBtn = input.parentElement.querySelector('.relock-save');
+            const original = parseInt(input.dataset.original, 10) || 0;
+            const current  = parseInt(input.value, 10) || 0;
+            if (current !== original) {
+                saveBtn.classList.add('visible');
+            } else {
+                saveBtn.classList.remove('visible');
+            }
+        };
+
+        // Save re-lock value to Firebase (minutes → seconds)
+        window.saveRelock = async function (btn) {
+            const cell  = btn.parentElement;
+            const input = cell.querySelector('.relock-input');
+            const machineId = input.dataset.machineId;
+            const minutes   = parseInt(input.value, 10) || 0;
+            const seconds   = Math.max(0, minutes) * 60;
+
+            btn.textContent = '…';
+            btn.disabled = true;
+
+            try {
+                const url = `${config.base_path}machines/${encodeURIComponent(machineId)}/relock_after_seconds.json?auth=${config.auth_secret}`;
+                const res = await fetch(url, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(seconds)
+                });
+
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+                // Update local state
+                const m = machines.find(x => x.id === machineId);
+                if (m) m.relock_after_seconds = seconds;
+
+                input.dataset.original = String(minutes);
+                btn.classList.remove('visible');
+                showToast(`Re-lock timer set to ${minutes} min for ${machineId.slice(0,8)}…`);
+            } catch (err) {
+                showToast('Failed to save re-lock timer: ' + err.message);
+            } finally {
+                btn.textContent = '✔';
+                btn.disabled = false;
+            }
+        };
 
         // ──────────────────────────────────────────────
         //  RESTORE SESSION

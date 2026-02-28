@@ -63,6 +63,10 @@
       <Generator>MSBuild:Compile</Generator>
       <SubType>Designer</SubType>
     </Page>
+    <Page Include="UI\ReLockWarningWindow.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
     <Compile Include="App.xaml.cs">
       <DependentUpon>App.xaml</DependentUpon>
       <SubType>Code</SubType>
@@ -72,8 +76,13 @@
     <Compile Include="Services\FirebaseService.cs" />
     <Compile Include="Services\KeyboardHookService.cs" />
     <Compile Include="Services\PasswordRotationService.cs" />
+    <Compile Include="Services\ReLockService.cs" />
     <Compile Include="UI\LockWindow.xaml.cs">
       <DependentUpon>LockWindow.xaml</DependentUpon>
+      <SubType>Code</SubType>
+    </Compile>
+    <Compile Include="UI\ReLockWarningWindow.xaml.cs">
+      <DependentUpon>ReLockWarningWindow.xaml</DependentUpon>
       <SubType>Code</SubType>
     </Compile>
     <Compile Include="Utils\Converters.cs" />
