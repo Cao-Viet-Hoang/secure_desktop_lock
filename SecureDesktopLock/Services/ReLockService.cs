@@ -79,8 +79,9 @@ namespace SecureDesktopLock.Services
         /// <summary>
         /// Reads the re-lock interval (Firebase → App.config fallback) and
         /// starts the countdown.  Does nothing if the resolved interval is 0.
+        /// Returns the resolved interval in seconds (0 means re-lock is disabled).
         /// </summary>
-        public async Task StartAsync(string machineId)
+        public async Task<int> StartAsync(string machineId)
         {
             Cancel(); // ensure no lingering timer
 
@@ -112,7 +113,7 @@ namespace SecureDesktopLock.Services
                 if (intervalSeconds == 0)
                 {
                     Logger.LogInfo("[ReLock] Re-lock disabled via Firebase (relock_after_seconds = 0).");
-                    return;
+                    return 0;
                 }
             }
             else
@@ -134,7 +135,7 @@ namespace SecureDesktopLock.Services
             if (intervalSeconds <= 0)
             {
                 Logger.LogInfo("[ReLock] Re-lock is disabled (interval = 0).");
-                return;
+                return 0;
             }
 
             // ── 4. Read warn-before threshold ─────────────────────────────
@@ -160,6 +161,8 @@ namespace SecureDesktopLock.Services
                 _timer.Elapsed += OnTimerElapsed;
                 _timer.Start();
             }
+
+            return intervalSeconds;
         }
 
         /// <summary>

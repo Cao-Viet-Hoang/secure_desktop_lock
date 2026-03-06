@@ -17,11 +17,14 @@ namespace SecureDesktopLock.ViewModels
     /// Responsibilities
     /// ----------------
     ///   • Hold state exposed to the XAML bindings (status message, busy flag).
-    ///   • Coordinate the password validation flow:
-    ///       1. Try Firebase first (online mode).
-    ///       2. Fall back to the local cached password (offline mode).
+    ///   • Coordinate the password validation flow (cache-first strategy):
+    ///       1. Kick off Firebase fetch in the background immediately.
+    ///       2. Compare against local cache (instant, no network wait).
+    ///          – Cache hit  → unlock immediately; Firebase sync continues in background.
+    ///          – Cache miss → await the in-flight Firebase tasks, compare fresh values.
+    ///       3. If Firebase is also unavailable, retry against whatever the cache holds.
     ///   • Trigger password rotation (<see cref="PasswordRotationService"/>) on
-    ///     success so every unlock consumes a unique one-time password.
+    ///     success — only the matched password (current or backup) is rotated.
     ///   • Raise <see cref="UnlockSucceeded"/> event for the View to close itself.
     ///
     /// Threading
@@ -145,6 +148,18 @@ namespace SecureDesktopLock.ViewModels
         // ------------------------------------------------------------------ //
 
         /// <summary>
+        /// Result of a password validation attempt indicating which password
+        /// (if any) was matched.
+        /// </summary>
+        private enum PasswordMatchResult
+        {
+            NoMatch,
+            MasterPassword,
+            CurrentPassword,
+            BackupPassword
+        }
+
+        /// <summary>
         /// Entry-point called by the command binding.  Receives the
         /// <see cref="SecureString"/> directly from the <c>PasswordBox</c>
         /// via the CommandParameter binding (see LockWindow XAML).
@@ -165,26 +180,41 @@ namespace SecureDesktopLock.ViewModels
 
             try
             {
-                bool success = await ValidatePasswordAsync(securePassword)
+                PasswordMatchResult result = await ValidatePasswordAsync(securePassword)
                     .ConfigureAwait(false);
 
-                if (success)
+                if (result != PasswordMatchResult.NoMatch)
                 {
-                    PostToUi(() => StatusMessage = "Unlocked — starting session…");
+                    // Close the lock screen immediately — the user should never
+                    // wait for rotation or logging.  Both are fire-and-forget.
+                    PostToUi(() =>
+                    {
+                        StatusMessage = "Unlocked — starting session…";
+                        UnlockSucceeded?.Invoke(this, EventArgs.Empty);
+                    });
 
-                    // Await rotation so the new password is fully saved to
-                    // Firebase and local cache BEFORE the app is shut down.
-                    // RotateAsync swallows its own errors internally, so this
-                    // will never throw and adds only a brief network round-trip
-                    // delay (~100-500 ms) before the window closes.
-                    await _rotationService.RotateAsync(_machineId)
-                        .ConfigureAwait(false);
+                    // Rotation and logging run in the background after the
+                    // window is already gone.  Errors are logged but never
+                    // surfaced to the (now unlocked) user.
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            if (result == PasswordMatchResult.CurrentPassword)
+                                await _rotationService.RotateAsync(_machineId, isBackup: false)
+                                    .ConfigureAwait(false);
+                            else if (result == PasswordMatchResult.BackupPassword)
+                                await _rotationService.RotateAsync(_machineId, isBackup: true)
+                                    .ConfigureAwait(false);
 
-                    await Logger.LogUnlockSuccessAsync(_machineId)
-                        .ConfigureAwait(false);
-
-                    // Raise the event on the UI thread
-                    PostToUi(() => UnlockSucceeded?.Invoke(this, EventArgs.Empty));
+                            await Logger.LogUnlockSuccessAsync(_machineId)
+                                .ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.LogError("Background post-unlock task failed.", ex);
+                        }
+                    });
                 }
                 else
                 {
@@ -211,19 +241,29 @@ namespace SecureDesktopLock.ViewModels
         }
 
         /// <summary>
-        /// Compares the entered password against the stored password.
-        /// Tries Firebase first; falls back to the local cache if
-        /// Firebase is unavailable.
-        /// Also accepts the master password read from the config file as a
-        /// fail-safe fallback without consulting Firebase or the cache.
+        /// Validates the entered password using a cache-first strategy.
+        ///
+        /// Flow
+        /// ----
+        ///   1. Firebase fetch tasks are started immediately (background).
+        ///   2. Local cache is read synchronously (no network cost).
+        ///   3. If the cache contains a match → return immediately; the
+        ///      in-flight Firebase tasks keep running to refresh the cache.
+        ///   4. If no cache match (or cache is cold) → await the Firebase
+        ///      tasks and compare against the fresh values.
+        ///   5. If Firebase is also unavailable → fall back to the already-read
+        ///      cache values (true offline mode).
+        ///
+        /// Also accepts the master password as an instant fail-safe regardless
+        /// of all other paths.
         /// </summary>
-        private async Task<bool> ValidatePasswordAsync(SecureString secureInput)
+        private async Task<PasswordMatchResult> ValidatePasswordAsync(SecureString secureInput)
         {
             // Convert SecureString → plain-text (in a controlled scope)
             string enteredPassword = SecureStringToString(secureInput);
 
             // ----------------------------------------------------------------
-            // Master password: always accepted as a fail-safe fallback
+            // Master password: instant fail-safe, no cache/Firebase needed
             // ----------------------------------------------------------------
             if (!string.IsNullOrEmpty(_masterPassword) &&
                 string.Equals(enteredPassword, _masterPassword, StringComparison.Ordinal))
@@ -231,73 +271,167 @@ namespace SecureDesktopLock.ViewModels
                 enteredPassword = null;
                 await Logger.LogUnlockSuccessAsync(_machineId, isMasterPassword: true)
                     .ConfigureAwait(false);
-                return true;
+                return PasswordMatchResult.MasterPassword;
             }
 
-            string encryptedStored = null;
-            bool usedCache = false;
-
-            // --- Step 1: Attempt Firebase ---
+            // ----------------------------------------------------------------
+            // Step 1: Kick off Firebase fetch in background immediately.
+            //         Do NOT await yet — we want the cache comparison to happen
+            //         in parallel while the network requests are in flight.
+            // ----------------------------------------------------------------
+            Task<string> firebaseCurrentTask = null;
+            Task<string> firebaseBackupTask = null;
             try
             {
-                if (await _firebaseService.IsAvailableAsync().ConfigureAwait(false))
-                {
-                    encryptedStored = await _firebaseService
-                        .GetPasswordAsync(_machineId)
-                        .ConfigureAwait(false);
-
-                    // Keep the local cache in sync with the Firebase value
-                    if (encryptedStored != null)
-                        _rotationService.WriteCache(encryptedStored);
-                }
+                firebaseCurrentTask = _firebaseService.GetPasswordAsync(_machineId);
+                firebaseBackupTask = _firebaseService.GetBackupPasswordAsync(_machineId);
             }
             catch (Exception ex)
             {
-                Logger.LogFirebaseError(ex, "ValidatePassword.GetFromFirebase");
+                Logger.LogFirebaseError(ex, "ValidatePassword.StartFirebaseFetch");
             }
 
-            // --- Step 2: Fall back to local cache ---
-            if (encryptedStored == null)
-            {
-                encryptedStored = _rotationService.ReadCachedPassword();
-                usedCache = encryptedStored != null;
+            // ----------------------------------------------------------------
+            // Step 2: Read local cache synchronously (instant, no network).
+            // ----------------------------------------------------------------
+            string cachedCurrent = _rotationService.ReadCachedPassword();
+            string cachedBackup = _rotationService.ReadBackupCachedPassword();
 
-                if (usedCache)
+            // ----------------------------------------------------------------
+            // Step 3: Cache-first comparison.
+            //         If the cache has a match we unlock right away and let the
+            //         Firebase tasks finish in the background to keep the cache
+            //         fresh for the next unlock.
+            // ----------------------------------------------------------------
+            if (cachedCurrent != null || cachedBackup != null)
+            {
+                PasswordMatchResult cacheResult =
+                    ComparePasswords(enteredPassword, cachedCurrent, cachedBackup);
+
+                if (cacheResult != PasswordMatchResult.NoMatch)
+                {
+                    // Sync Firebase → cache in background; don't block the unlock.
+                    _ = SyncCacheFromFirebaseAsync(firebaseCurrentTask, firebaseBackupTask);
+                    enteredPassword = null;
+                    return cacheResult;
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // Step 4: Cache miss (cold start) or wrong password in cache.
+            //         Await the already-running Firebase tasks for fresh data.
+            // ----------------------------------------------------------------
+            string encryptedCurrent = null;
+            string encryptedBackup = null;
+
+            if (firebaseCurrentTask != null && firebaseBackupTask != null)
+            {
+                try
+                {
+                    await Task.WhenAll(firebaseCurrentTask, firebaseBackupTask)
+                        .ConfigureAwait(false);
+
+                    encryptedCurrent = firebaseCurrentTask.Result;
+                    encryptedBackup = firebaseBackupTask.Result;
+
+                    // Keep cache in sync
+                    if (encryptedCurrent != null)
+                        _rotationService.WriteCache(encryptedCurrent);
+                    if (encryptedBackup != null)
+                        _rotationService.WriteBackupCache(encryptedBackup);
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogFirebaseError(ex, "ValidatePassword.AwaitFirebase");
+                }
+            }
+
+            // ----------------------------------------------------------------
+            // Step 5: If Firebase returned nothing (offline), fall back to the
+            //         cache values that were already read in Step 2.
+            // ----------------------------------------------------------------
+            if (encryptedCurrent == null && encryptedBackup == null)
+            {
+                encryptedCurrent = cachedCurrent;
+                encryptedBackup = cachedBackup;
+
+                if (encryptedCurrent != null || encryptedBackup != null)
                     PostToUi(() => StatusMessage = "Offline mode — using cached password.");
                 else
                 {
+                    enteredPassword = null;
                     PostToUi(() => StatusMessage =
                         "No password record found. Contact your administrator.");
-                    return false;
+                    return PasswordMatchResult.NoMatch;
                 }
             }
 
-            // --- Step 3: Read and compare ---
             try
             {
-                if (_encryptionService.TryDecrypt(encryptedStored, out string storedPlain))
-                {
-                    bool match = string.Equals(
-                        enteredPassword, storedPlain, StringComparison.Ordinal);
-
-                    storedPlain = null;
-
-                    return match;
-                }
-                else
-                {
-                    Logger.LogError(
-                        $"Failed to read stored password for machineId={_machineId}.");
-                    PostToUi(() => StatusMessage =
-                        "Password data is missing or corrupt. " +
-                        "Contact your administrator.");
-                    return false;
-                }
+                return ComparePasswords(enteredPassword, encryptedCurrent, encryptedBackup);
             }
             finally
             {
-                // Zero the entered password string (best-effort in managed code)
                 enteredPassword = null;
+            }
+        }
+
+        /// <summary>
+        /// Compares <paramref name="enteredPassword"/> against the decrypted
+        /// current and backup passwords in order.
+        /// Returns the first match, or <see cref="PasswordMatchResult.NoMatch"/>.
+        /// </summary>
+        private PasswordMatchResult ComparePasswords(
+            string enteredPassword,
+            string encryptedCurrent,
+            string encryptedBackup)
+        {
+            if (encryptedCurrent != null &&
+                _encryptionService.TryDecrypt(encryptedCurrent, out string currentPlain))
+            {
+                bool match = string.Equals(enteredPassword, currentPlain, StringComparison.Ordinal);
+                currentPlain = null;
+                if (match) return PasswordMatchResult.CurrentPassword;
+            }
+
+            if (encryptedBackup != null &&
+                _encryptionService.TryDecrypt(encryptedBackup, out string backupPlain))
+            {
+                bool match = string.Equals(enteredPassword, backupPlain, StringComparison.Ordinal);
+                backupPlain = null;
+                if (match) return PasswordMatchResult.BackupPassword;
+            }
+
+            return PasswordMatchResult.NoMatch;
+        }
+
+        /// <summary>
+        /// Awaits the already-running Firebase tasks and writes their results
+        /// to the local cache.  Intended to be called fire-and-forget
+        /// (<c>_ = SyncCacheFromFirebaseAsync(…)</c>) after a cache-hit unlock
+        /// so the cache stays fresh without blocking the user.
+        /// All errors are caught and logged.
+        /// </summary>
+        private async Task SyncCacheFromFirebaseAsync(
+            Task<string> currentTask,
+            Task<string> backupTask)
+        {
+            if (currentTask == null || backupTask == null) return;
+            try
+            {
+                await Task.WhenAll(currentTask, backupTask).ConfigureAwait(false);
+
+                string current = currentTask.Result;
+                string backup = backupTask.Result;
+
+                if (current != null) _rotationService.WriteCache(current);
+                if (backup != null) _rotationService.WriteBackupCache(backup);
+
+                Logger.LogInfo("[LockViewModel] Background Firebase→cache sync completed.");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogFirebaseError(ex, "ValidatePassword.BackgroundCacheSync");
             }
         }
 

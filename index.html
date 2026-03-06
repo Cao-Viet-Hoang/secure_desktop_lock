@@ -404,7 +404,7 @@
             tbody tr {
                 display: grid;
                 grid-template-columns: 1fr 1fr;
-                grid-template-rows: auto auto auto;
+                grid-template-rows: auto auto auto auto;
                 background: var(--surface);
                 border: 1px solid var(--border);
                 border-radius: var(--radius);
@@ -450,11 +450,16 @@
                 width: 100%;
             }
 
-            /* Password — left column */
-            tbody td[data-label="Password"] {
+            /* Current Password — left column */
+            tbody td[data-label="Current Password"] {
                 grid-column: 1;
                 grid-row: 2;
                 border-right: 1px solid var(--border);
+            }
+            /* Backup Password — right column, same row */
+            tbody td[data-label="Backup Password"] {
+                grid-column: 2;
+                grid-row: 2;
             }
             .pass-cell {
                 width: 100%;
@@ -462,14 +467,15 @@
             }
             .pass-value { font-size: .95rem; letter-spacing: 2px; padding: 3px 8px; }
 
-            /* Status — right column, same row as password */
+            /* Status — spans full width, row 3 */
             tbody td[data-label="Status"] {
-                grid-column: 2;
-                grid-row: 2;
+                grid-column: 1 / -1;
+                grid-row: 3;
                 flex-direction: row;
                 align-items: flex-start;
                 flex-wrap: wrap;
                 gap: 3px;
+                border-top: 1px solid var(--border);
             }
             tbody td[data-label="Status"]::before {
                 width: 100%;
@@ -478,7 +484,7 @@
             /* Last Updated — spans full width as footer */
             tbody td[data-label="Last Updated"] {
                 grid-column: 1 / -1;
-                grid-row: 3;
+                grid-row: 4;
                 border-top: 1px solid var(--border);
                 flex-direction: row;
                 align-items: center;
@@ -599,7 +605,7 @@
 
         <!-- Toolbar -->
         <div class="toolbar">
-            <input class="search-box" type="text" id="searchInput" placeholder="Search by Machine ID or Password..." oninput="renderTable()" />
+            <input class="search-box" type="text" id="searchInput" placeholder="Search by Machine ID or Password (current/backup)..." oninput="renderTable()" />
             <button class="btn btn-outline" onclick="exportCSV()">📥 Export CSV</button>
         </div>
 
@@ -611,13 +617,14 @@
                         <th style="width:40px">#</th>
                         <th>Machine ID</th>
                         <th>Current Password</th>
+                        <th>Backup Password</th>
                         <th>Re-lock (min)</th>
                         <th>Last Updated</th>
                         <th>Status</th>
                     </tr>
                 </thead>
                 <tbody id="machineTableBody">
-                    <tr><td colspan="6" class="no-data">Loading data…</td></tr>
+                    <tr><td colspan="7" class="no-data">Loading data…</td></tr>
                 </tbody>
             </table>
         </div>
@@ -723,6 +730,7 @@
                     machines.push({
                         id,
                         current_password: value?.current_password ?? '—',
+                        backup_password:  value?.backup_password  ?? '—',
                         last_updated:     value?.last_updated     ?? null,
                         relock_after_seconds: value?.relock_after_seconds ?? 0
                     });
@@ -750,11 +758,12 @@
 
             const filtered = machines.filter(m =>
                 m.id.toLowerCase().includes(query) ||
-                m.current_password.toLowerCase().includes(query)
+                m.current_password.toLowerCase().includes(query) ||
+                m.backup_password.toLowerCase().includes(query)
             );
 
             if (filtered.length === 0) {
-                tbody.innerHTML = '<tr><td colspan="6" class="no-data">No machines found.</td></tr>';
+                tbody.innerHTML = '<tr><td colspan="7" class="no-data">No machines found.</td></tr>';
                 return;
             }
 
@@ -765,10 +774,16 @@
                 <tr>
                     <td data-label="#" style="color:var(--muted)">${i + 1}</td>
                     <td data-label="Machine ID" class="machine-id">${esc(m.id)}</td>
-                    <td data-label="Password">
+                    <td data-label="Current Password">
                         <div class="pass-cell">
                             <span class="pass-value">${esc(m.current_password)}</span>
                             <button class="copy-btn" onclick="copyPass(this, '${esc(m.current_password)}')" title="Copy">📋</button>
+                        </div>
+                    </td>
+                    <td data-label="Backup Password">
+                        <div class="pass-cell">
+                            <span class="pass-value">${esc(m.backup_password)}</span>
+                            <button class="copy-btn" onclick="copyPass(this, '${esc(m.backup_password)}')" title="Copy">📋</button>
                         </div>
                     </td>
                     <td data-label="Re-lock">
@@ -859,10 +874,10 @@
         // ──────────────────────────────────────────────
         window.exportCSV = function () {
             if (machines.length === 0) return showToast('No data to export.');
-            const header = 'Machine ID,Current Password,Re-lock (seconds),Last Updated,Status\n';
+            const header = 'Machine ID,Current Password,Backup Password,Re-lock (seconds),Last Updated,Status\n';
             const rows = machines.map(m => {
                 const s = getStatus(m.last_updated);
-                return `"${m.id}","${m.current_password}","${m.relock_after_seconds ?? 0}","${m.last_updated ?? ''}","${s.label}"`;
+                return `"${m.id}","${m.current_password}","${m.backup_password}","${m.relock_after_seconds ?? 0}","${m.last_updated ?? ''}","${s.label}"`;
             }).join('\n');
             const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8;' });
             const a = document.createElement('a');
