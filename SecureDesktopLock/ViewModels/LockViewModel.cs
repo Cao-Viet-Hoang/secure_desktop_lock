@@ -21,7 +21,7 @@ namespace SecureDesktopLock.ViewModels
     ///       1. Try Firebase first (online mode).
     ///       2. Fall back to the local cached password (offline mode).
     ///   • Trigger password rotation (<see cref="PasswordRotationService"/>) on
-    ///     success so every unlock consumes a unique one-time password.
+    ///     success — only the matched password (current or backup) is rotated.
     ///   • Raise <see cref="UnlockSucceeded"/> event for the View to close itself.
     ///
     /// Threading
@@ -145,6 +145,18 @@ namespace SecureDesktopLock.ViewModels
         // ------------------------------------------------------------------ //
 
         /// <summary>
+        /// Result of a password validation attempt indicating which password
+        /// (if any) was matched.
+        /// </summary>
+        private enum PasswordMatchResult
+        {
+            NoMatch,
+            MasterPassword,
+            CurrentPassword,
+            BackupPassword
+        }
+
+        /// <summary>
         /// Entry-point called by the command binding.  Receives the
         /// <see cref="SecureString"/> directly from the <c>PasswordBox</c>
         /// via the CommandParameter binding (see LockWindow XAML).
@@ -165,20 +177,25 @@ namespace SecureDesktopLock.ViewModels
 
             try
             {
-                bool success = await ValidatePasswordAsync(securePassword)
+                PasswordMatchResult result = await ValidatePasswordAsync(securePassword)
                     .ConfigureAwait(false);
 
-                if (success)
+                if (result != PasswordMatchResult.NoMatch)
                 {
                     PostToUi(() => StatusMessage = "Unlocked — starting session…");
 
-                    // Await rotation so the new password is fully saved to
-                    // Firebase and local cache BEFORE the app is shut down.
-                    // RotateAsync swallows its own errors internally, so this
-                    // will never throw and adds only a brief network round-trip
-                    // delay (~100-500 ms) before the window closes.
-                    await _rotationService.RotateAsync(_machineId)
-                        .ConfigureAwait(false);
+                    // Rotate only the password that was used to unlock.
+                    // Master password never triggers rotation.
+                    if (result == PasswordMatchResult.CurrentPassword)
+                    {
+                        await _rotationService.RotateAsync(_machineId, isBackup: false)
+                            .ConfigureAwait(false);
+                    }
+                    else if (result == PasswordMatchResult.BackupPassword)
+                    {
+                        await _rotationService.RotateAsync(_machineId, isBackup: true)
+                            .ConfigureAwait(false);
+                    }
 
                     await Logger.LogUnlockSuccessAsync(_machineId)
                         .ConfigureAwait(false);
@@ -211,13 +228,14 @@ namespace SecureDesktopLock.ViewModels
         }
 
         /// <summary>
-        /// Compares the entered password against the stored password.
-        /// Tries Firebase first; falls back to the local cache if
+        /// Compares the entered password against both the current and backup
+        /// passwords.  Tries Firebase first; falls back to local cache if
         /// Firebase is unavailable.
         /// Also accepts the master password read from the config file as a
         /// fail-safe fallback without consulting Firebase or the cache.
+        /// Returns which password was matched (or <see cref="PasswordMatchResult.NoMatch"/>).
         /// </summary>
-        private async Task<bool> ValidatePasswordAsync(SecureString secureInput)
+        private async Task<PasswordMatchResult> ValidatePasswordAsync(SecureString secureInput)
         {
             // Convert SecureString → plain-text (in a controlled scope)
             string enteredPassword = SecureStringToString(secureInput);
@@ -231,10 +249,11 @@ namespace SecureDesktopLock.ViewModels
                 enteredPassword = null;
                 await Logger.LogUnlockSuccessAsync(_machineId, isMasterPassword: true)
                     .ConfigureAwait(false);
-                return true;
+                return PasswordMatchResult.MasterPassword;
             }
 
-            string encryptedStored = null;
+            string encryptedCurrent = null;
+            string encryptedBackup = null;
             bool usedCache = false;
 
             // --- Step 1: Attempt Firebase ---
@@ -242,13 +261,19 @@ namespace SecureDesktopLock.ViewModels
             {
                 if (await _firebaseService.IsAvailableAsync().ConfigureAwait(false))
                 {
-                    encryptedStored = await _firebaseService
+                    encryptedCurrent = await _firebaseService
                         .GetPasswordAsync(_machineId)
                         .ConfigureAwait(false);
 
-                    // Keep the local cache in sync with the Firebase value
-                    if (encryptedStored != null)
-                        _rotationService.WriteCache(encryptedStored);
+                    encryptedBackup = await _firebaseService
+                        .GetBackupPasswordAsync(_machineId)
+                        .ConfigureAwait(false);
+
+                    // Keep the local cache in sync with the Firebase values
+                    if (encryptedCurrent != null)
+                        _rotationService.WriteCache(encryptedCurrent);
+                    if (encryptedBackup != null)
+                        _rotationService.WriteBackupCache(encryptedBackup);
                 }
             }
             catch (Exception ex)
@@ -257,10 +282,11 @@ namespace SecureDesktopLock.ViewModels
             }
 
             // --- Step 2: Fall back to local cache ---
-            if (encryptedStored == null)
+            if (encryptedCurrent == null && encryptedBackup == null)
             {
-                encryptedStored = _rotationService.ReadCachedPassword();
-                usedCache = encryptedStored != null;
+                encryptedCurrent = _rotationService.ReadCachedPassword();
+                encryptedBackup = _rotationService.ReadBackupCachedPassword();
+                usedCache = encryptedCurrent != null || encryptedBackup != null;
 
                 if (usedCache)
                     PostToUi(() => StatusMessage = "Offline mode — using cached password.");
@@ -268,31 +294,37 @@ namespace SecureDesktopLock.ViewModels
                 {
                     PostToUi(() => StatusMessage =
                         "No password record found. Contact your administrator.");
-                    return false;
+                    return PasswordMatchResult.NoMatch;
                 }
             }
 
-            // --- Step 3: Read and compare ---
+            // --- Step 3: Compare against current password ---
             try
             {
-                if (_encryptionService.TryDecrypt(encryptedStored, out string storedPlain))
+                if (encryptedCurrent != null &&
+                    _encryptionService.TryDecrypt(encryptedCurrent, out string currentPlain))
                 {
-                    bool match = string.Equals(
-                        enteredPassword, storedPlain, StringComparison.Ordinal);
-
-                    storedPlain = null;
-
-                    return match;
+                    if (string.Equals(enteredPassword, currentPlain, StringComparison.Ordinal))
+                    {
+                        currentPlain = null;
+                        return PasswordMatchResult.CurrentPassword;
+                    }
+                    currentPlain = null;
                 }
-                else
+
+                // --- Step 4: Compare against backup password ---
+                if (encryptedBackup != null &&
+                    _encryptionService.TryDecrypt(encryptedBackup, out string backupPlain))
                 {
-                    Logger.LogError(
-                        $"Failed to read stored password for machineId={_machineId}.");
-                    PostToUi(() => StatusMessage =
-                        "Password data is missing or corrupt. " +
-                        "Contact your administrator.");
-                    return false;
+                    if (string.Equals(enteredPassword, backupPlain, StringComparison.Ordinal))
+                    {
+                        backupPlain = null;
+                        return PasswordMatchResult.BackupPassword;
+                    }
+                    backupPlain = null;
                 }
+
+                return PasswordMatchResult.NoMatch;
             }
             finally
             {

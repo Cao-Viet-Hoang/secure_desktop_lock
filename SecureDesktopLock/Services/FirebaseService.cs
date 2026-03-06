@@ -18,6 +18,7 @@ namespace SecureDesktopLock.Services
     /// Realtime Database layout
     /// ------------------------
     ///   machines/{machineId}/current_password  : string
+    ///   machines/{machineId}/backup_password   : string
     ///   machines/{machineId}/last_updated       : string  (ISO-8601 GMT+7)
     ///
     /// Configuration
@@ -141,7 +142,7 @@ namespace SecureDesktopLock.Services
         }
 
         /// <summary>
-        /// Writes (creates or overwrites) the password for this machine
+        /// Writes (creates or overwrites) the current password for this machine
         /// in the Realtime Database.
         /// </summary>
         public virtual async Task SetPasswordAsync(
@@ -167,11 +168,71 @@ namespace SecureDesktopLock.Services
                     .SetAsync($"machines/{machineId}/last_updated", timestamp)
                     .ConfigureAwait(false);
 
-                Logger.LogInfo($"[FireSharp] Password written for machines/{machineId}.");
+                Logger.LogInfo($"[FireSharp] Current password written for machines/{machineId}.");
             }
             catch (Exception ex)
             {
                 Logger.LogFirebaseError(ex, "FirebaseService.SetPasswordAsync");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Fetches the backup password string for this machine from the Realtime Database.
+        /// Returns <c>null</c> when the node does not exist yet.
+        /// </summary>
+        public virtual async Task<string> GetBackupPasswordAsync(
+            string machineId,
+            CancellationToken ct = default)
+        {
+            try
+            {
+                var response = await _client
+                    .GetAsync($"machines/{machineId}/backup_password")
+                    .ConfigureAwait(false);
+
+                if (response?.Body == null || response.Body == "null")
+                {
+                    Logger.LogInfo($"[FireSharp] Node machines/{machineId}/backup_password does not exist.");
+                    return null;
+                }
+
+                return response.ResultAs<string>();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogFirebaseError(ex, "FirebaseService.GetBackupPasswordAsync");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Writes (creates or overwrites) the backup password for this machine
+        /// in the Realtime Database.
+        /// </summary>
+        public virtual async Task SetBackupPasswordAsync(
+            string machineId,
+            string encryptedPassword,
+            CancellationToken ct = default)
+        {
+            try
+            {
+                DateTimeOffset gmt7Time = DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromHours(7));
+                string timestamp = gmt7Time.ToString("o");
+
+                await _client
+                    .SetAsync($"machines/{machineId}/backup_password", encryptedPassword)
+                    .ConfigureAwait(false);
+
+                await _client
+                    .SetAsync($"machines/{machineId}/last_updated", timestamp)
+                    .ConfigureAwait(false);
+
+                Logger.LogInfo($"[FireSharp] Backup password written for machines/{machineId}.");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogFirebaseError(ex, "FirebaseService.SetBackupPasswordAsync");
                 throw;
             }
         }

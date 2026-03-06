@@ -18,6 +18,12 @@ namespace SecureDesktopLock.Services
     ///   • Character set: digits only (numeric PIN-style)
     ///   • Source       : <see cref="RNGCryptoServiceProvider"/> (CSPRNG)
     ///
+    /// Dual-password scheme
+    /// --------------------
+    ///   Two independent passwords exist: <c>current_password</c> and
+    ///   <c>backup_password</c>.  Both can unlock the screen.  When one
+    ///   is used, only that password is rotated; the other stays unchanged.
+    ///
     /// Rotation flow
     /// -------------
     ///   1. Generate a new password.
@@ -54,9 +60,13 @@ namespace SecureDesktopLock.Services
         //  Cache path                                                         //
         // ------------------------------------------------------------------ //
 
-        /// <summary>Full path to the local offline password cache file.</summary>
+        /// <summary>Full path to the local offline password cache file (current password).</summary>
         public static readonly string CachePath =
             Path.Combine(Logger.DataRoot, "cache.dat");
+
+        /// <summary>Full path to the local offline backup password cache file.</summary>
+        public static readonly string BackupCachePath =
+            Path.Combine(Logger.DataRoot, "cache_backup.dat");
 
         // ------------------------------------------------------------------ //
         //  Dependencies                                                       //
@@ -90,13 +100,18 @@ namespace SecureDesktopLock.Services
         /// This method is called immediately after a successful unlock so that
         /// each unlock session uses a unique one-time password (OTP-like flow).
         ///
+        /// When <paramref name="isBackup"/> is <c>true</c>, only the backup
+        /// password is rotated; otherwise only the current password is rotated.
+        ///
         /// Failures are logged but do NOT propagate — the unlock
         /// has already succeeded and we must not disrupt the user session.
         /// </summary>
         public async Task RotateAsync(
             string machineId,
+            bool isBackup = false,
             CancellationToken ct = default)
         {
+            string label = isBackup ? "backup" : "current";
             string newPassword = GenerateSecurePassword();
             string encrypted = _encryptionService.Encrypt(newPassword);
 
@@ -106,35 +121,43 @@ namespace SecureDesktopLock.Services
             // 1. Upload to Firebase
             try
             {
-                await _firebaseService
-                    .SetPasswordAsync(machineId, encrypted, ct)
-                    .ConfigureAwait(false);
+                if (isBackup)
+                    await _firebaseService
+                        .SetBackupPasswordAsync(machineId, encrypted, ct)
+                        .ConfigureAwait(false);
+                else
+                    await _firebaseService
+                        .SetPasswordAsync(machineId, encrypted, ct)
+                        .ConfigureAwait(false);
                 savedRemotely = true;
             }
             catch (Exception ex)
             {
-                Logger.LogFirebaseError(ex, "PasswordRotation.UploadToFirebase");
+                Logger.LogFirebaseError(ex, $"PasswordRotation.UploadToFirebase ({label})");
             }
 
             // 2. Write to local cache (always attempt, independently of Firebase)
             try
             {
-                WriteCache(encrypted);
+                if (isBackup)
+                    WriteBackupCache(encrypted);
+                else
+                    WriteCache(encrypted);
                 savedLocally = true;
             }
             catch (Exception ex)
             {
-                Logger.LogError("Failed to write local password cache.", ex);
+                Logger.LogError($"Failed to write local {label} password cache.", ex);
             }
 
             if (savedRemotely && savedLocally)
-                Logger.LogInfo($"Password rotated successfully for machineId={machineId}");
+                Logger.LogInfo($"{label} password rotated successfully for machineId={machineId}");
             else if (savedLocally)
                 Logger.LogWarning(
-                    $"Password cached locally but NOT uploaded to Firebase. machineId={machineId}");
+                    $"{label} password cached locally but NOT uploaded to Firebase. machineId={machineId}");
             else
                 Logger.LogError(
-                    $"Password rotation FAILED (no save target succeeded). machineId={machineId}");
+                    $"{label} password rotation FAILED (no save target succeeded). machineId={machineId}");
         }
 
         /// <summary>
@@ -186,35 +209,64 @@ namespace SecureDesktopLock.Services
                         return;
                     }
 
-                    string existing = await _firebaseService
+                    // --- Current password ---
+                    string existingCurrent = await _firebaseService
                         .GetPasswordAsync(machineId, ct)
                         .ConfigureAwait(false);
 
-                    if (existing != null)
+                    if (existingCurrent != null)
                     {
                         Logger.LogInfo(
-                            $"EnsurePasswordExists: password already exists for machineId={machineId}.");
-                        return;
+                            $"EnsurePasswordExists: current password already exists for machineId={machineId}.");
+                    }
+                    else
+                    {
+                        Logger.LogInfo(
+                            $"EnsurePasswordExists: no current password for machineId={machineId} — auto-seeding.");
+
+                        string newCurrent = GenerateSecurePassword();
+                        string storedCurrent = _encryptionService.Encrypt(newCurrent);
+
+                        await _firebaseService
+                            .SetPasswordAsync(machineId, storedCurrent, ct)
+                            .ConfigureAwait(false);
+
+                        WriteCache(storedCurrent);
+
+                        Logger.LogInfo(
+                            $"EnsurePasswordExists: auto-seeded current password for machineId={machineId}. " +
+                            $"Password (plaintext): {newCurrent}");
                     }
 
-                    // No password found — generate and seed
-                    Logger.LogInfo(
-                        $"EnsurePasswordExists: no record found for machineId={machineId} — auto-seeding.");
-
-                    string newPassword = GenerateSecurePassword();
-                    string stored = _encryptionService.Encrypt(newPassword);
-
-                    await _firebaseService
-                        .SetPasswordAsync(machineId, stored, ct)
+                    // --- Backup password ---
+                    string existingBackup = await _firebaseService
+                        .GetBackupPasswordAsync(machineId, ct)
                         .ConfigureAwait(false);
 
-                    WriteCache(stored);
+                    if (existingBackup != null)
+                    {
+                        Logger.LogInfo(
+                            $"EnsurePasswordExists: backup password already exists for machineId={machineId}.");
+                    }
+                    else
+                    {
+                        Logger.LogInfo(
+                            $"EnsurePasswordExists: no backup password for machineId={machineId} — auto-seeding.");
 
-                    // Log the plaintext password so the administrator can retrieve it.
-                    // Remove this log line once encryption is enabled.
-                    Logger.LogInfo(
-                        $"EnsurePasswordExists: auto-seeded password for machineId={machineId}. " +
-                        $"Password (plaintext): {newPassword}");
+                        string newBackup = GenerateSecurePassword();
+                        string storedBackup = _encryptionService.Encrypt(newBackup);
+
+                        await _firebaseService
+                            .SetBackupPasswordAsync(machineId, storedBackup, ct)
+                            .ConfigureAwait(false);
+
+                        WriteBackupCache(storedBackup);
+
+                        Logger.LogInfo(
+                            $"EnsurePasswordExists: auto-seeded backup password for machineId={machineId}. " +
+                            $"Password (plaintext): {newBackup}");
+                    }
+
                     return; // Success — exit the retry loop
                 }
                 catch (Exception ex)
@@ -258,13 +310,42 @@ namespace SecureDesktopLock.Services
         }
 
         /// <summary>
-        /// Writes the password to the local offline cache.
+        /// Writes the current password to the local offline cache.
         /// Creates the parent directory automatically.
         /// </summary>
         public void WriteCache(string encryptedBlob)
         {
             EnsureCacheDir();
             File.WriteAllText(CachePath, encryptedBlob, Encoding.UTF8);
+        }
+
+        /// <summary>
+        /// Retrieves the backup password from the local offline cache.
+        /// Returns <c>null</c> when the cache file does not exist or is empty.
+        /// </summary>
+        public string ReadBackupCachedPassword()
+        {
+            try
+            {
+                if (!File.Exists(BackupCachePath)) return null;
+                string blob = File.ReadAllText(BackupCachePath, Encoding.UTF8).Trim();
+                return string.IsNullOrEmpty(blob) ? null : blob;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("Failed to read local backup password cache.", ex);
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Writes the backup password to the local offline cache.
+        /// Creates the parent directory automatically.
+        /// </summary>
+        public void WriteBackupCache(string encryptedBlob)
+        {
+            EnsureCacheDir();
+            File.WriteAllText(BackupCachePath, encryptedBlob, Encoding.UTF8);
         }
 
         // ------------------------------------------------------------------ //

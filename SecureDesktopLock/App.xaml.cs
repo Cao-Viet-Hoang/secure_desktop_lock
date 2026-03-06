@@ -66,6 +66,9 @@ namespace SecureDesktopLock
         // Re-lock warning overlay (null when not shown)
         private ReLockWarningWindow _warningWindow;
 
+        // Unlock toast notification (null when not shown)
+        private UnlockToastWindow _unlockToast;
+
         // ------------------------------------------------------------------ //
         //  Application_Startup                                               //
         // ------------------------------------------------------------------ //
@@ -208,15 +211,21 @@ namespace SecureDesktopLock
 
             // After a successful unlock the window closes.
             // Stay resident so sleep/resume events can re-lock the screen.
-            lockWindow.Closed += (_, __) =>
+            lockWindow.Closed += async (_, __) =>
             {
                 Logger.LogInfo("LockWindow closed — screen unlocked, app staying resident.");
                 _activeLockWindow = null;
                 _appExiting = true;   // pause watchdog while unlocked
 
-                // Start the auto re-lock countdown
+                // Release keyboard hook so Win, Alt, etc. work normally
+                _keyboardHook?.Stop();
+
+                // Start the auto re-lock countdown and get the resolved interval
                 string mid = MachineInfo.GetMachineId();
-                _ = _reLockService.StartAsync(mid);
+                int relockSeconds = await _reLockService.StartAsync(mid);
+
+                // Show toast notification with relock time info (auto-closes after 5 s)
+                ShowUnlockToast(relockSeconds);
             };
 
             MainWindow = lockWindow;
@@ -225,6 +234,10 @@ namespace SecureDesktopLock
             // Cancel any running re-lock timer (avoid double-trigger)
             _reLockService?.Cancel();
             CloseWarningWindow();
+            CloseUnlockToast();
+
+            // Re-install keyboard hook to block Win, Alt+Tab, etc. while locked
+            _keyboardHook?.Start();
 
             lockWindow.Show();
         }
@@ -305,6 +318,41 @@ namespace SecureDesktopLock
             {
                 _warningWindow.Close();
                 _warningWindow = null;
+            }
+        }
+
+        /// <summary>
+        /// Shows a toast notification at the bottom-right corner that tells
+        /// the user how long until the screen re-locks and the exact clock
+        /// time.  The toast dismisses itself after 5 seconds.
+        /// </summary>
+        /// <param name="relockIntervalSeconds">
+        /// The re-lock interval in seconds (0 = feature disabled).
+        /// </param>
+        private void ShowUnlockToast(int relockIntervalSeconds)
+        {
+            // Close any previous toast that might still be fading
+            if (_unlockToast != null)
+            {
+                _unlockToast.Close();
+                _unlockToast = null;
+            }
+
+            _unlockToast = new UnlockToastWindow();
+            _unlockToast.SetRelockInfo(relockIntervalSeconds);
+            _unlockToast.Closed += (_, __) => _unlockToast = null;
+            _unlockToast.Show();
+        }
+
+        /// <summary>
+        /// Closes the unlock toast if it is currently visible.
+        /// </summary>
+        private void CloseUnlockToast()
+        {
+            if (_unlockToast != null)
+            {
+                _unlockToast.Close();
+                _unlockToast = null;
             }
         }
 
