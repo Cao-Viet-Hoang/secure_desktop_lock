@@ -173,6 +173,7 @@
         }
 
         body { padding-top: 68px; }
+
         .brand {
             display: flex;
             align-items: center;
@@ -775,9 +776,10 @@
         .live-dot {
             width: 6px; height: 6px;
             border-radius: 50%;
-            background: var(--success);
-            box-shadow: 0 0 0 3px rgba(16, 185, 129, .2);
+            background: var(--warning);
+            box-shadow: 0 0 0 3px rgba(245, 158, 11, .2);
             animation: blink 2s infinite;
+            flex-shrink: 0;
         }
         @keyframes blink {
             0%, 100% { opacity: .4; }
@@ -942,11 +944,11 @@
             </div>
             <div class="stat">
                 <div class="stat-head">
-                    <div class="stat-label">Last Refresh</div>
+                    <div class="stat-label">Last Update</div>
                     <div class="stat-icon warning"><svg class="icon"><use href="#i-clock"/></svg></div>
                 </div>
                 <div class="stat-value small" id="statLastRefresh">—</div>
-                <div class="stat-trend">Auto-updates every 10 seconds</div>
+                <div class="stat-trend">Updates in real time</div>
             </div>
         </div>
 
@@ -971,7 +973,7 @@
 
         <div class="refresh-meta">
             <span class="live-dot"></span>
-            Auto-refreshing every 10 seconds
+            <span id="sseStatus">Connecting…</span>
         </div>
     </div>
 </div>
@@ -990,29 +992,24 @@
     // ───────────────────────────────────────────────────────────
     function applyTheme(theme) {
         document.documentElement.setAttribute('data-theme', theme);
-        const icon = document.querySelector('#themeIcon use');
-        icon.setAttribute('href', theme === 'dark' ? '#i-sun' : '#i-moon');
+        document.querySelector('#themeIcon use').setAttribute('href', theme === 'dark' ? '#i-sun' : '#i-moon');
         localStorage.setItem('theme', theme);
     }
-
     window.toggleTheme = function () {
-        const current = document.documentElement.getAttribute('data-theme') || 'dark';
-        applyTheme(current === 'dark' ? 'light' : 'dark');
+        applyTheme((document.documentElement.getAttribute('data-theme') || 'dark') === 'dark' ? 'light' : 'dark');
     };
-
-    // Apply saved theme (default: dark)
     applyTheme(localStorage.getItem('theme') || 'dark');
 
     // ──── Constants ────
-    const REFRESH_INTERVAL_MS = 10_000;
     const ONLINE_THRESHOLD_MS = 60_000;
     const STALE_THRESHOLD_MS  = 5 * 60_000;
     const UNLOCK_TOKEN_TTL_MS = 60_000;
 
     // ──── State ────
-    let config    = null;
-    let machines  = [];
-    let refreshId = null;
+    let config      = null;
+    let machines    = [];
+    let rawData     = {};       // mirror of Firebase machines/ node
+    let eventSource = null;
 
     const $ = id => document.getElementById(id);
 
@@ -1022,7 +1019,6 @@
     window.connect = async function () {
         const raw = $('configInput').value.trim();
         hideError();
-
         if (!raw) return showError('Please paste the Firebase configuration JSON.');
 
         let parsed;
@@ -1031,7 +1027,6 @@
 
         if (!parsed.base_path)   return showError('Missing "base_path" field.');
         if (!parsed.auth_secret) return showError('Missing "auth_secret" field.');
-
         if (!parsed.base_path.endsWith('/')) parsed.base_path += '/';
 
         config = parsed;
@@ -1040,13 +1035,12 @@
         btn.innerHTML = '<span class="spinner"></span> Connecting…';
 
         try {
-            await fetchMachines();
+            await fetchMachines(true);   // validate credentials only; SSE will render
             $('loginPanel').style.display = 'none';
             $('dashboard').classList.add('visible');
             $('appbarActions').classList.add('visible');
-
             localStorage.setItem('fb_config', JSON.stringify(config));
-            startAutoRefresh();
+            startRealtime();
         } catch (err) {
             showError('Could not connect to Firebase: ' + err.message);
             config = null;
@@ -1057,139 +1051,223 @@
     };
 
     window.logout = function () {
-        stopAutoRefresh();
-        config = null;
-        machines = [];
+        stopRealtime();
+        config = null; machines = []; rawData = {};
         localStorage.removeItem('fb_config');
         $('loginPanel').style.display = 'flex';
         $('dashboard').classList.remove('visible');
         $('appbarActions').classList.remove('visible');
     };
 
-    function showError(msg) {
-        $('loginErrorText').textContent = msg;
-        $('loginError').classList.add('visible');
-    }
-    function hideError() {
-        $('loginError').classList.remove('visible');
-    }
+    function showError(msg) { $('loginErrorText').textContent = msg; $('loginError').classList.add('visible'); }
+    function hideError()    { $('loginError').classList.remove('visible'); }
 
     // ───────────────────────────────────────────────────────────
-    //  FETCH
+    //  ONE-TIME FETCH (manual refresh + credential validation)
     // ───────────────────────────────────────────────────────────
-    window.fetchMachines = async function () {
+    //  Pass skipRender=true to validate credentials without rendering;
+    //  the SSE stream's first `put /` event will deliver fresh data.
+    window.fetchMachines = async function (skipRender = false) {
         const url = `${config.base_path}machines.json?auth=${encodeURIComponent(config.auth_secret)}`;
         const res = await fetch(url, { cache: 'no-store' });
-
-        if (!res.ok) {
-            const body = await res.text();
-            throw new Error(`HTTP ${res.status}: ${body}`);
-        }
-
+        if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
         const data = await res.json();
-        machines = [];
-
-        if (data && typeof data === 'object') {
-            for (const [id, value] of Object.entries(data)) {
-                if (id === '__ping__') continue;
-                machines.push({
-                    id,
-                    offline_pin:          value?.offline_pin           ?? null,
-                    last_seen:            value?.last_seen             ?? null,
-                    last_updated:         value?.last_updated          ?? null,
-                    relock_after_seconds: value?.relock_after_seconds  ?? 0,
-                    has_pending_unlock:   !!value?.unlock_request
-                });
-            }
-        }
-
-        machines.sort((a, b) => {
-            const aOnline = isOnline(a.last_seen);
-            const bOnline = isOnline(b.last_seen);
-            if (aOnline !== bOnline) return aOnline ? -1 : 1;
-            const aT = new Date(a.last_seen || a.last_updated || 0).getTime();
-            const bT = new Date(b.last_seen || b.last_updated || 0).getTime();
-            return bT - aT;
-        });
-
-        updateStats();
-        renderMachines();
-        $('statLastRefresh').textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
+        rawData = data && typeof data === 'object' ? data : {};
+        if (!skipRender) afterUpdate();
     };
 
     // ───────────────────────────────────────────────────────────
-    //  RENDER
+    //  SERVER-SENT EVENTS — real-time streaming
     // ───────────────────────────────────────────────────────────
-    window.renderMachines = function () {
-        const list = $('machineList');
-        const query = ($('searchInput').value || '').toLowerCase().trim();
+    function startRealtime() {
+        stopRealtime();
+        const url = `${config.base_path}machines.json?auth=${encodeURIComponent(config.auth_secret)}`;
+        eventSource = new EventSource(url);
 
+        eventSource.addEventListener('put', e => {
+            try { const { path, data } = JSON.parse(e.data); applyPut(path, data); afterUpdate(); }
+            catch (err) { console.warn('[SSE] put error:', err); }
+        });
+
+        eventSource.addEventListener('patch', e => {
+            try { const { path, data } = JSON.parse(e.data); applyPatch(path, data); afterUpdate(); }
+            catch (err) { console.warn('[SSE] patch error:', err); }
+        });
+
+        // Firebase sends `cancel` when read permissions at the listened path are revoked.
+        eventSource.addEventListener('cancel', () => {
+            showToast('Firebase stream cancelled — check your database rules.', 'error');
+            stopRealtime();
+        });
+
+        // Firebase sends `auth_revoked` when the auth token expires or is rejected.
+        eventSource.addEventListener('auth_revoked', () => {
+            showToast('Auth token expired — please reconnect.', 'error');
+            stopRealtime();
+        });
+
+        eventSource.onopen  = () => setConnectionStatus(true);
+        eventSource.onerror = () => setConnectionStatus(false);  // EventSource auto-reconnects
+    }
+
+    function stopRealtime() {
+        if (eventSource) { eventSource.close(); eventSource = null; }
+        setConnectionStatus(false);
+    }
+
+    function setConnectionStatus(connected) {
+        const dot   = document.querySelector('.live-dot');
+        const label = $('sseStatus');
+        if (!dot || !label) return;
+        if (connected) {
+            dot.style.background = 'var(--success)';
+            dot.style.boxShadow  = '0 0 0 3px rgba(16,185,129,.2)';
+            label.textContent    = 'Realtime — live';
+        } else {
+            dot.style.background = 'var(--warning)';
+            dot.style.boxShadow  = '0 0 0 3px rgba(245,158,11,.2)';
+            label.textContent    = 'Reconnecting…';
+        }
+    }
+
+    // ───────────────────────────────────────────────────────────
+    //  SSE DATA HELPERS — apply incremental Firebase updates
+    // ───────────────────────────────────────────────────────────
+    function applyPut(path, data) {
+        const parts = path.split('/').filter(Boolean);
+        if (parts.length === 0) {
+            rawData = data && typeof data === 'object' ? data : {};
+        } else if (parts.length === 1) {
+            if (data === null) delete rawData[parts[0]];
+            else rawData[parts[0]] = data;
+        } else {
+            const [id, ...rest] = parts;
+            if (!rawData[id] || typeof rawData[id] !== 'object') rawData[id] = {};
+            setDeep(rawData[id], rest, data);
+        }
+    }
+
+    function applyPatch(path, data) {
+        if (!data || typeof data !== 'object') return;
+        const parts = path.split('/').filter(Boolean);
+        if (parts.length === 0) {
+            for (const [k, v] of Object.entries(data)) {
+                if (v === null) { delete rawData[k]; continue; }
+                rawData[k] = typeof v === 'object' ? { ...(rawData[k] || {}), ...v } : v;
+            }
+        } else {
+            const [id, ...rest] = parts;
+            if (!rawData[id] || typeof rawData[id] !== 'object') rawData[id] = {};
+            if (rest.length === 0) {
+                // Apply per-field, treating null as deletion (Firebase convention).
+                for (const [k, v] of Object.entries(data)) {
+                    if (v === null) delete rawData[id][k];
+                    else rawData[id][k] = v;
+                }
+            } else {
+                setDeep(rawData[id], rest, data);
+            }
+        }
+    }
+
+    function setDeep(obj, parts, value) {
+        for (let i = 0; i < parts.length - 1; i++) {
+            if (!obj[parts[i]] || typeof obj[parts[i]] !== 'object') obj[parts[i]] = {};
+            obj = obj[parts[i]];
+        }
+        const last = parts[parts.length - 1];
+        if (value === null) delete obj[last];
+        else obj[last] = value;
+    }
+
+    // ───────────────────────────────────────────────────────────
+    //  REBUILD & RENDER
+    // ───────────────────────────────────────────────────────────
+    //  Don't blow away the DOM if the user is actively editing an input
+    //  inside a machine card (otherwise their typed value gets erased
+    //  every time a heartbeat lands).
+    function isUserEditing() {
+        return !!document.activeElement?.closest('#machineList input');
+    }
+
+    function afterUpdate() {
+        rebuildMachines();
+        updateStats();
+        if (!isUserEditing()) renderMachines();
+        $('statLastRefresh').textContent = new Date().toLocaleTimeString('en-US', { hour12: false });
+    }
+
+    // Periodic re-render keeps "Xs/Xm/Xh ago" timestamps fresh on machines
+    // that don't push heartbeats (offline ones), without it they'd appear
+    // stuck. Skipped while the user is editing an input.
+    setInterval(() => { if (!isUserEditing()) renderMachines(); }, 30_000);
+
+    function rebuildMachines() {
+        machines = [];
+        for (const [id, value] of Object.entries(rawData)) {
+            if (id === '__ping__' || !value || typeof value !== 'object') continue;
+            machines.push({
+                id,
+                offline_pin:          value.offline_pin           ?? null,
+                last_seen:            value.last_seen             ?? null,
+                last_updated:         value.last_updated          ?? null,
+                relock_after_seconds: value.relock_after_seconds  ?? 0,
+                has_pending_unlock:   !!value.unlock_request
+            });
+        }
+        machines.sort((a, b) => {
+            const aOn = isOnline(a.last_seen), bOn = isOnline(b.last_seen);
+            if (aOn !== bOn) return aOn ? -1 : 1;
+            return new Date(b.last_seen || b.last_updated || 0) - new Date(a.last_seen || a.last_updated || 0);
+        });
+    }
+
+    window.renderMachines = function () {
+        const list  = $('machineList');
+        const query = ($('searchInput').value || '').toLowerCase().trim();
         const filtered = machines.filter(m =>
-            m.id.toLowerCase().includes(query) ||
-            (m.offline_pin || '').toLowerCase().includes(query)
+            m.id.toLowerCase().includes(query) || (m.offline_pin || '').toLowerCase().includes(query)
         );
 
         if (filtered.length === 0) {
             const iconId = query ? 'i-search' : 'i-monitor';
             const title  = query ? 'No matches found' : 'No machines connected yet';
             const desc   = query ? 'Try a different search term.' : 'Machines running Secure Desktop Lock will appear here.';
-            list.innerHTML = `
-                <div class="no-data">
-                    <div class="no-data-icon">
-                        <svg class="icon xl"><use href="#${iconId}"/></svg>
-                    </div>
-                    <h3>${title}</h3>
-                    <p>${desc}</p>
-                </div>`;
+            list.innerHTML = `<div class="no-data"><div class="no-data-icon"><svg class="icon xl"><use href="#${iconId}"/></svg></div><h3>${title}</h3><p>${desc}</p></div>`;
             return;
         }
-
-        list.innerHTML = filtered.map(m => renderCard(m)).join('');
+        list.innerHTML = filtered.map(renderCard).join('');
     };
 
     function renderCard(m) {
-        const status   = getStatus(m);
-        const relockMin = m.relock_after_seconds > 0
-            ? Math.round(m.relock_after_seconds / 60) : 0;
-        const idShort  = m.id.length > 16 ? m.id.slice(0, 10) + '…' + m.id.slice(-4) : m.id;
-        const seenAgo  = m.last_seen ? timeAgo(m.last_seen) : 'Never connected';
-
-        const isOnlineCard = status.cls === 'online';
+        const status    = getStatus(m);
+        const relockMin = m.relock_after_seconds > 0 ? Math.round(m.relock_after_seconds / 60) : 0;
+        const idShort   = m.id.length > 16 ? m.id.slice(0, 10) + '…' + m.id.slice(-4) : m.id;
+        const seenAgo   = m.last_seen ? timeAgo(m.last_seen) : 'Never connected';
+        const online    = status.cls === 'online';
 
         return `
         <div class="machine-card ${status.cls}">
             <div class="card-head">
                 <div class="card-id-wrap">
-                    <div class="card-id-icon">
-                        <svg class="icon lg"><use href="#i-monitor"/></svg>
-                    </div>
+                    <div class="card-id-icon"><svg class="icon lg"><use href="#i-monitor"/></svg></div>
                     <div class="card-id-text">
                         <span class="label-tag">Machine ID</span>
                         <div class="machine-id" title="${esc(m.id)}">${esc(idShort)}</div>
                     </div>
                 </div>
-                <span class="status-pill ${status.cls}">
-                    <span class="dot"></span>${status.label}
-                </span>
+                <span class="status-pill ${status.cls}"><span class="dot"></span>${status.label}</span>
             </div>
-
             <div class="card-body">
                 <div class="info-block">
-                    <div class="info-label">
-                        <svg class="icon sm"><use href="#i-pin"/></svg>
-                        Offline PIN
-                    </div>
+                    <div class="info-label"><svg class="icon sm"><use href="#i-pin"/></svg>Offline PIN</div>
                     <div class="pin-row">
                         <span class="info-value">${esc(m.offline_pin || '—')}</span>
-                        ${m.offline_pin ? `<button class="copy-btn" onclick="copyText(this, '${esc(m.offline_pin)}')" title="Copy PIN" aria-label="Copy"><svg class="icon sm"><use href="#i-copy"/></svg></button>` : ''}
+                        ${m.offline_pin ? `<button class="copy-btn" onclick="copyText(this,'${esc(m.offline_pin)}')" title="Copy PIN" aria-label="Copy"><svg class="icon sm"><use href="#i-copy"/></svg></button>` : ''}
                     </div>
                 </div>
-
                 <div class="info-block">
-                    <div class="info-label">
-                        <svg class="icon sm"><use href="#i-timer"/></svg>
-                        Auto Re-lock
-                    </div>
+                    <div class="info-label"><svg class="icon sm"><use href="#i-timer"/></svg>Auto Re-lock</div>
                     <div class="relock-row">
                         <input class="relock-input" type="number" min="0" max="1440"
                                inputmode="numeric" pattern="[0-9]*"
@@ -1204,21 +1282,14 @@
                         </button>
                     </div>
                 </div>
-
                 <div class="info-block full">
-                    <div class="info-label">
-                        <svg class="icon sm"><use href="#i-activity"/></svg>
-                        Last Activity
-                    </div>
+                    <div class="info-label"><svg class="icon sm"><use href="#i-activity"/></svg>Last Activity</div>
                     <div class="info-value tiny">${esc(seenAgo)}${m.last_seen ? ' · ' + esc(formatTime(m.last_seen)) : ''}</div>
                 </div>
             </div>
-
             <div class="card-actions">
-                <button class="unlock-btn"
-                        ${isOnlineCard ? '' : 'disabled'}
-                        onclick="sendUnlock(this, '${esc(m.id)}')">
-                    ${isOnlineCard
+                <button class="unlock-btn" ${online ? '' : 'disabled'} onclick="sendUnlock(this,'${esc(m.id)}')">
+                    ${online
                         ? '<svg class="icon" style="stroke:#fff"><use href="#i-unlock"/></svg> Unlock This Machine'
                         : '<svg class="icon"><use href="#i-lock"/></svg> Machine Offline'}
                 </button>
@@ -1230,15 +1301,12 @@
     //  STATS / STATUS
     // ───────────────────────────────────────────────────────────
     function updateStats() {
-        $('statTotal').textContent = machines.length;
+        $('statTotal').textContent  = machines.length;
         $('statOnline').textContent = machines.filter(m => isOnline(m.last_seen)).length;
     }
-
     function isOnline(lastSeen) {
-        if (!lastSeen) return false;
-        return (Date.now() - new Date(lastSeen).getTime()) < ONLINE_THRESHOLD_MS;
+        return !!lastSeen && (Date.now() - new Date(lastSeen).getTime()) < ONLINE_THRESHOLD_MS;
     }
-
     function getStatus(m) {
         if (!m.last_seen) return { cls: 'offline', label: 'Never seen' };
         const diff = Date.now() - new Date(m.last_seen).getTime();
@@ -1252,48 +1320,40 @@
     // ───────────────────────────────────────────────────────────
     window.sendUnlock = async function (btn, machineId) {
         if (btn.disabled) return;
-
         const original = btn.innerHTML;
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner"></span> Sending…';
 
-        const token   = randomToken(32);
-        const issued  = nowGmt7();
-        const expires = gmt7Plus(UNLOCK_TOKEN_TTL_MS);
-
         try {
             const url = `${config.base_path}machines/${encodeURIComponent(machineId)}/unlock_request.json?auth=${encodeURIComponent(config.auth_secret)}`;
             const res = await fetch(url, {
-                method: 'PUT',
+                method:  'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ token, issued_at: issued, expires_at: expires })
+                body:    JSON.stringify({ token: randomToken(32), issued_at: nowGmt7(), expires_at: gmt7Plus(UNLOCK_TOKEN_TTL_MS) })
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
             showToast('Unlock command sent — the machine will unlock shortly.', 'success');
-            setTimeout(fetchMachines, 4000);
+            // SSE will push the state change automatically — no manual fetch needed
         } catch (err) {
             showToast('Failed to send command: ' + err.message, 'error');
         } finally {
             btn.innerHTML = original;
-            btn.disabled = false;
+            btn.disabled  = false;
         }
     };
 
     function randomToken(hexLen) {
-        const bytes = new Uint8Array(hexLen / 2);
-        crypto.getRandomValues(bytes);
-        return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+        const b = new Uint8Array(hexLen / 2);
+        crypto.getRandomValues(b);
+        return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
     }
-    function nowGmt7() { return toGmt7Iso(new Date()); }
+    function nowGmt7()    { return toGmt7Iso(new Date()); }
     function gmt7Plus(ms) { return toGmt7Iso(new Date(Date.now() + ms)); }
     function toGmt7Iso(d) {
-        const utc = d.getTime();
-        const gmt7 = new Date(utc + 7 * 3600 * 1000);
-        const pad = n => String(n).padStart(2, '0');
-        const padms = n => String(n).padStart(3, '0');
-        return `${gmt7.getUTCFullYear()}-${pad(gmt7.getUTCMonth()+1)}-${pad(gmt7.getUTCDate())}T` +
-               `${pad(gmt7.getUTCHours())}:${pad(gmt7.getUTCMinutes())}:${pad(gmt7.getUTCSeconds())}.${padms(gmt7.getUTCMilliseconds())}+07:00`;
+        const g = new Date(d.getTime() + 7 * 3600 * 1000);
+        const p = n => String(n).padStart(2, '0'), pm = n => String(n).padStart(3, '0');
+        return `${g.getUTCFullYear()}-${p(g.getUTCMonth()+1)}-${p(g.getUTCDate())}T` +
+               `${p(g.getUTCHours())}:${p(g.getUTCMinutes())}:${p(g.getUTCSeconds())}.${pm(g.getUTCMilliseconds())}+07:00`;
     }
 
     // ───────────────────────────────────────────────────────────
@@ -1307,9 +1367,7 @@
             btn.innerHTML = '<svg class="icon sm"><use href="#i-check"/></svg>';
             showToast('Copied to clipboard', 'success');
             setTimeout(() => { btn.classList.remove('copied'); btn.innerHTML = orig; }, 1300);
-        } catch {
-            showToast('Could not copy to clipboard', 'error');
-        }
+        } catch { showToast('Could not copy to clipboard', 'error'); }
     };
 
     // ───────────────────────────────────────────────────────────
@@ -1319,40 +1377,32 @@
         const saveBtn  = input.parentElement.querySelector('.relock-save');
         const original = parseInt(input.dataset.original, 10) || 0;
         const current  = parseInt(input.value, 10) || 0;
-        if (current !== original) saveBtn.classList.add('visible');
-        else                      saveBtn.classList.remove('visible');
+        saveBtn.classList.toggle('visible', current !== original);
     };
 
     window.saveRelock = async function (btn) {
-        const cell  = btn.parentElement;
-        const input = cell.querySelector('.relock-input');
+        const input     = btn.parentElement.querySelector('.relock-input');
         const machineId = input.dataset.machineId;
         const minutes   = Math.max(0, parseInt(input.value, 10) || 0);
-        const seconds   = minutes * 60;
-
-        const originalHtml = btn.innerHTML;
+        const origHtml  = btn.innerHTML;
         btn.innerHTML = '<span class="spinner"></span>';
-        btn.disabled = true;
+        btn.disabled  = true;
         try {
             const url = `${config.base_path}machines/${encodeURIComponent(machineId)}/relock_after_seconds.json?auth=${encodeURIComponent(config.auth_secret)}`;
             const res = await fetch(url, {
-                method: 'PUT',
+                method:  'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(seconds)
+                body:    JSON.stringify(minutes * 60)
             });
             if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-            const m = machines.find(x => x.id === machineId);
-            if (m) m.relock_after_seconds = seconds;
-
             input.dataset.original = String(minutes);
             btn.classList.remove('visible');
             showToast(`Saved: ${minutes} minute${minutes === 1 ? '' : 's'}`, 'success');
         } catch (err) {
             showToast('Save failed: ' + err.message, 'error');
         } finally {
-            btn.innerHTML = originalHtml;
-            btn.disabled = false;
+            btn.innerHTML = origHtml;
+            btn.disabled  = false;
         }
     };
 
@@ -1360,20 +1410,17 @@
     //  TIME HELPERS
     // ───────────────────────────────────────────────────────────
     function formatTime(iso) {
-        try { return new Date(iso).toLocaleString('en-US', { hour12: false }); }
-        catch { return iso; }
+        try { return new Date(iso).toLocaleString('en-US', { hour12: false }); } catch { return iso; }
     }
     function timeAgo(iso) {
-        const diff = Date.now() - new Date(iso).getTime();
-        const sec = Math.floor(diff / 1000);
-        if (sec < 0)    return 'just now';
-        if (sec < 60)   return `${sec} second${sec === 1 ? '' : 's'} ago`;
+        const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+        if (sec < 0)   return 'just now';
+        if (sec < 60)  return `${sec}s ago`;
         const min = Math.floor(sec / 60);
-        if (min < 60)   return `${min} minute${min === 1 ? '' : 's'} ago`;
-        const hr  = Math.floor(min / 60);
-        if (hr < 24)    return `${hr} hour${hr === 1 ? '' : 's'} ago`;
-        const day = Math.floor(hr / 24);
-        return `${day} day${day === 1 ? '' : 's'} ago`;
+        if (min < 60)  return `${min}m ago`;
+        const hr = Math.floor(min / 60);
+        if (hr < 24)   return `${hr}h ago`;
+        return `${Math.floor(hr / 24)}d ago`;
     }
 
     // ───────────────────────────────────────────────────────────
@@ -1384,29 +1431,10 @@
         const svg = btn.querySelector('svg');
         btn.disabled = true;
         svg.style.animation = 'spin .7s linear infinite';
-        try {
-            await fetchMachines();
-        } catch (err) {
-            showToast('Refresh failed: ' + err.message, 'error');
-        } finally {
-            btn.disabled = false;
-            svg.style.animation = '';
-        }
+        try { await fetchMachines(); }
+        catch (err) { showToast('Refresh failed: ' + err.message, 'error'); }
+        finally { btn.disabled = false; svg.style.animation = ''; }
     };
-
-    // ───────────────────────────────────────────────────────────
-    //  AUTO REFRESH
-    // ───────────────────────────────────────────────────────────
-    function startAutoRefresh() {
-        stopAutoRefresh();
-        refreshId = setInterval(async () => {
-            try { await fetchMachines(); }
-            catch (err) { console.warn('Auto-refresh failed:', err); }
-        }, REFRESH_INTERVAL_MS);
-    }
-    function stopAutoRefresh() {
-        if (refreshId) { clearInterval(refreshId); refreshId = null; }
-    }
 
     // ───────────────────────────────────────────────────────────
     //  TOAST
@@ -1442,10 +1470,7 @@
             $('loginPanel').style.display = 'none';
             $('dashboard').classList.add('visible');
             $('appbarActions').classList.add('visible');
-            fetchMachines().catch(err => {
-                showToast('Could not load data: ' + err.message, 'error');
-            });
-            startAutoRefresh();
+            startRealtime();   // SSE delivers data + handles bad credentials via auth_revoked
         } catch { /* ignore */ }
     })();
 
