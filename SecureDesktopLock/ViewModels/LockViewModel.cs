@@ -5,9 +5,10 @@ using System;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Security;
-using System.Threading;
 using System.Threading.Tasks;
+using System.Windows;
 using System.Windows.Input;
+using System.Windows.Threading;
 
 namespace SecureDesktopLock.ViewModels
 {
@@ -52,7 +53,7 @@ namespace SecureDesktopLock.ViewModels
         private int _failureCount = 0;
         private volatile bool _alreadyUnlocked = false;
         private readonly string _machineId;
-        private readonly SynchronizationContext _uiContext;
+        private readonly Dispatcher _uiDispatcher;
 
         // ------------------------------------------------------------------ //
         //  Constructor                                                        //
@@ -74,8 +75,12 @@ namespace SecureDesktopLock.ViewModels
                 ?? throw new ArgumentNullException(nameof(unlockCommandService));
 
             _machineId = MachineInfo.GetMachineId();
-            _uiContext = SynchronizationContext.Current
-                         ?? new SynchronizationContext();
+            // Capture the Application's UI dispatcher for reliable UI marshalling.
+            // SynchronizationContext.Current can be null in edge cases (e.g.
+            // immediately after sleep/resume), causing callbacks to run on the
+            // ThreadPool — which then throws when calling Window.Close().
+            _uiDispatcher = Application.Current?.Dispatcher
+                            ?? Dispatcher.CurrentDispatcher;
 
             _masterPassword = System.Configuration.ConfigurationManager
                                   .AppSettings["MasterPassword"]
@@ -135,13 +140,21 @@ namespace SecureDesktopLock.ViewModels
         /// </summary>
         private void OnAdminUnlockRequested(object sender, EventArgs e)
         {
-            if (_alreadyUnlocked) return;
+            Logger.LogInfo("[LockViewModel] OnAdminUnlockRequested fired (background thread).");
+
+            if (_alreadyUnlocked)
+            {
+                Logger.LogInfo("[LockViewModel] _alreadyUnlocked=true, ignoring duplicate.");
+                return;
+            }
             _alreadyUnlocked = true;
 
             PostToUi(() =>
             {
+                Logger.LogInfo("[LockViewModel] Posting unlock to UI thread — invoking UnlockSucceeded.");
                 StatusMessage = "Unlocked by admin…";
                 UnlockSucceeded?.Invoke(this, EventArgs.Empty);
+                Logger.LogInfo("[LockViewModel] UnlockSucceeded invocation returned.");
             });
 
             _ = Task.Run(async () =>
@@ -366,7 +379,17 @@ namespace SecureDesktopLock.ViewModels
 
         private void PostToUi(Action action)
         {
-            _uiContext.Post(_ => action(), null);
+            try
+            {
+                if (_uiDispatcher.CheckAccess())
+                    action();                       // already on UI thread
+                else
+                    _uiDispatcher.BeginInvoke(action);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("[LockViewModel] PostToUi dispatch failed.", ex);
+            }
         }
 
         // ------------------------------------------------------------------ //

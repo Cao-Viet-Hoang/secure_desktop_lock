@@ -157,8 +157,19 @@ namespace SecureDesktopLock.UI
         /// </summary>
         private void OnUnlockSucceeded(object sender, EventArgs e)
         {
+            SecureDesktopLock.Utils.Logger.LogInfo(
+                $"[LockWindow] OnUnlockSucceeded — closing window. " +
+                $"OnDispatcherThread={Dispatcher.CheckAccess()}");
             _allowClose = true;
-            Close();
+            try
+            {
+                Close();
+                SecureDesktopLock.Utils.Logger.LogInfo("[LockWindow] Close() returned.");
+            }
+            catch (Exception ex)
+            {
+                SecureDesktopLock.Utils.Logger.LogError("[LockWindow] Close() threw.", ex);
+            }
         }
 
         // ------------------------------------------------------------------ //

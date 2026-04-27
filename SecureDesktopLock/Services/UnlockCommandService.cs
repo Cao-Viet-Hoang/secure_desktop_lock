@@ -195,6 +195,8 @@ namespace SecureDesktopLock.Services
             Logger.LogInfo(
                 $"[UnlockCommand] Valid unlock command received (issued_at={req.IssuedAt}).");
 
+            int subs = UnlockRequested?.GetInvocationList().Length ?? 0;
+            Logger.LogInfo($"[UnlockCommand] Firing UnlockRequested to {subs} subscriber(s).");
             UnlockRequested?.Invoke(this, EventArgs.Empty);
         }
 
