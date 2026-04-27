@@ -53,7 +53,9 @@ namespace SecureDesktopLock
         private KeyboardHookService _keyboardHook;
         private FirebaseService _firebaseService;
         private EncryptionService _encryptionService;
-        private PasswordRotationService _rotationService;
+        private OfflinePinService _offlinePinService;
+        private UnlockCommandService _unlockCommandService;
+        private HeartbeatService _heartbeatService;
         private ReLockService _reLockService;
 
         // Watchdog thread
@@ -123,21 +125,21 @@ namespace SecureDesktopLock
             FirebaseService fs = _firebaseService
                 ?? new NullFirebaseService();
 
-            _rotationService = new PasswordRotationService(fs, _encryptionService);
+            string machineId = MachineInfo.GetMachineId();
+
+            _offlinePinService = new OfflinePinService(fs, _encryptionService);
+            _unlockCommandService = new UnlockCommandService(fs, machineId);
+            _heartbeatService = new HeartbeatService(fs, machineId);
 
             // ── 4b. Re-lock service ───────────────────────────────────────
             _reLockService = new ReLockService(fs);
             _reLockService.WarningTick += OnReLockWarningTick;
             _reLockService.ReLockRequested += OnReLockRequested;
 
-            // ── 5. Auto-seed password (fire-and-forget) ───────────────────
-            // If this machine has no password record in Firebase yet, generate
-            // one and upload it automatically.  Runs in the background so the
-            // lock window appears immediately without waiting for the network.
-            {
-                string machineId = MachineInfo.GetMachineId();
-                _ = _rotationService.EnsurePasswordExistsAsync(machineId);
-            }
+            // ── 5. Auto-seed offline PIN (fire-and-forget) ────────────────
+            // Pushes any pending offline rotation first, then seeds a fresh
+            // PIN if Firebase has none. Runs in the background.
+            _ = _offlinePinService.EnsurePinExistsAsync(machineId);
 
             // ── 6. Keyboard hook ──────────────────────────────────────────
             _keyboardHook = new KeyboardHookService();
@@ -168,6 +170,8 @@ namespace SecureDesktopLock
             _keyboardHook?.Stop();
             _keyboardHook?.Dispose();
 
+            _unlockCommandService?.Dispose();
+            _heartbeatService?.Dispose();
             _reLockService?.Dispose();
             _firebaseService?.Dispose();
 
@@ -203,7 +207,8 @@ namespace SecureDesktopLock
             LockViewModel viewModel = new LockViewModel(
                 fs,
                 _encryptionService,
-                _rotationService);
+                _offlinePinService,
+                _unlockCommandService);
 
             LockWindow lockWindow = new LockWindow();
             lockWindow.SetViewModel(viewModel);
@@ -216,6 +221,11 @@ namespace SecureDesktopLock
                 Logger.LogInfo("LockWindow closed — screen unlocked, app staying resident.");
                 _activeLockWindow = null;
                 _appExiting = true;   // pause watchdog while unlocked
+
+                // Stop signalling services — heartbeat + command listener only
+                // make sense while we're showing the lock screen.
+                _unlockCommandService?.Stop();
+                _heartbeatService?.Stop();
 
                 // Release keyboard hook so Win, Alt, etc. work normally
                 _keyboardHook?.Stop();
@@ -238,6 +248,10 @@ namespace SecureDesktopLock
 
             // Re-install keyboard hook to block Win, Alt+Tab, etc. while locked
             _keyboardHook?.Start();
+
+            // Start signalling services bound to lock-window lifecycle.
+            _unlockCommandService?.Start();
+            _heartbeatService?.Start();
 
             lockWindow.Show();
         }
@@ -475,24 +489,35 @@ namespace SecureDesktopLock
     {
         public NullFirebaseService() : base() { }
 
-        // Always returns false → callers fall back to local cache
         public override System.Threading.Tasks.Task<bool> IsAvailableAsync(
             CancellationToken ct = default)
             => System.Threading.Tasks.Task.FromResult(false);
 
-        // Silently ignore any upload attempts
-        public override System.Threading.Tasks.Task SetPasswordAsync(
-            string machineId, string encryptedPassword,
-            CancellationToken ct = default)
-            => System.Threading.Tasks.Task.CompletedTask;
-
-        // Always returns null → no password found
-        public override System.Threading.Tasks.Task<string> GetPasswordAsync(
+        public override System.Threading.Tasks.Task<string> GetOfflinePinAsync(
             string machineId,
             CancellationToken ct = default)
             => System.Threading.Tasks.Task.FromResult<string>(null);
 
-        // Always returns null → field not set (triggers App.config fallback)
+        public override System.Threading.Tasks.Task SetOfflinePinAsync(
+            string machineId, string encryptedPin,
+            CancellationToken ct = default)
+            => System.Threading.Tasks.Task.CompletedTask;
+
+        public override System.Threading.Tasks.Task<UnlockRequest> GetUnlockRequestAsync(
+            string machineId,
+            CancellationToken ct = default)
+            => System.Threading.Tasks.Task.FromResult<UnlockRequest>(null);
+
+        public override System.Threading.Tasks.Task DeleteUnlockRequestAsync(
+            string machineId,
+            CancellationToken ct = default)
+            => System.Threading.Tasks.Task.CompletedTask;
+
+        public override System.Threading.Tasks.Task SetLastSeenAsync(
+            string machineId,
+            CancellationToken ct = default)
+            => System.Threading.Tasks.Task.CompletedTask;
+
         public override System.Threading.Tasks.Task<int?> GetReLockIntervalAsync(
             string machineId,
             CancellationToken ct = default)

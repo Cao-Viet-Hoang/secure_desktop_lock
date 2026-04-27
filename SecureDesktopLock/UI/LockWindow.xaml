@@ -192,46 +192,63 @@
                     FontSize="11"
                     Foreground="{StaticResource TextSecondaryBrush}"
                     HorizontalAlignment="Center"
-                    Margin="0,0,0,28"
+                    Margin="0,0,0,18"
                     Text="{Binding MachineId, StringFormat='Machine: {0}'}"/>
 
-                <!-- Password label -->
+                <!-- Primary status: waiting for admin / unlock progress -->
+                <Border
+                    Background="#0F0F1A"
+                    BorderBrush="{StaticResource InputBorderBrush}"
+                    BorderThickness="1"
+                    CornerRadius="8"
+                    Padding="14,12"
+                    Margin="0,0,0,24">
+                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
+                        <Ellipse Width="8" Height="8"
+                                 Fill="#7CFFB0"
+                                 VerticalAlignment="Center"
+                                 Margin="0,0,8,0">
+                            <Ellipse.Effect>
+                                <DropShadowEffect Color="#7CFFB0" BlurRadius="8" ShadowDepth="0"/>
+                            </Ellipse.Effect>
+                        </Ellipse>
+                        <TextBlock
+                            x:Name="StatusText"
+                            Text="{Binding StatusMessage}"
+                            FontSize="13"
+                            FontWeight="Medium"
+                            TextWrapping="Wrap"
+                            TextAlignment="Center"
+                            Foreground="{StaticResource TextPrimaryBrush}"/>
+                    </StackPanel>
+                </Border>
+
+                <!-- Emergency PIN section -->
                 <TextBlock
-                    Text="Enter Password"
-                    FontSize="12"
-                    FontWeight="Medium"
+                    Text="HOẶC NHẬP PIN KHẨN CẤP"
+                    FontSize="10"
+                    FontWeight="SemiBold"
                     Foreground="{StaticResource TextSecondaryBrush}"
-                    Margin="0,0,0,6"/>
+                    HorizontalAlignment="Center"
+                    Margin="0,0,0,8"/>
 
                 <!-- Password input -->
                 <PasswordBox
                     x:Name="PasswordInput"
                     Style="{StaticResource LockPasswordBoxStyle}"
-                    Height="54"
-                    Margin="0,0,0,16"
-                    ToolTip="Enter the unlock password"/>
+                    Height="48"
+                    Margin="0,0,0,12"
+                    ToolTip="Liên hệ admin để lấy PIN khi không có Internet"/>
 
                 <!-- Unlock button -->
                 <Button
                     x:Name="UnlockButton"
-                    Content="UNLOCK"
+                    Content="MỞ KHÓA BẰNG PIN"
                     Style="{StaticResource UnlockButtonStyle}"
-                    Height="46"
+                    Height="42"
                     IsDefault="True"
                     Click="UnlockButton_Click"
-                    IsEnabled="{Binding IsUnlocking, Converter={StaticResource BoolNegationConverter}, FallbackValue=True}"
-                    Margin="0,0,0,16"/>
-
-                <!-- Status / feedback message -->
-                <TextBlock
-                    x:Name="StatusText"
-                    Text="{Binding StatusMessage}"
-                    FontSize="12"
-                    TextWrapping="Wrap"
-                    TextAlignment="Center"
-                    HorizontalAlignment="Center"
-                    Foreground="{StaticResource AccentBrush}"
-                    MinHeight="18"/>
+                    IsEnabled="{Binding IsUnlocking, Converter={StaticResource BoolNegationConverter}, FallbackValue=True}"/>
 
                 <!-- Busy indicator -->
                 <ProgressBar
@@ -256,7 +273,7 @@
             Margin="0,0,0,18"
             FontSize="11"
             Foreground="{StaticResource TextSecondaryBrush}"
-            Text="SecureDesktopLock  ·  Protected by DPAPI + Firebase"/>
+            Text="SecureDesktopLock  ·  Mở khóa từ xa qua dashboard"/>
 
     </Grid>
 </Window>

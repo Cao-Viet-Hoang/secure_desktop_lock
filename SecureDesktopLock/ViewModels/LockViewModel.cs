@@ -14,24 +14,19 @@ namespace SecureDesktopLock.ViewModels
     /// <summary>
     /// ViewModel for the <c>LockWindow</c>.
     ///
-    /// Responsibilities
-    /// ----------------
-    ///   • Hold state exposed to the XAML bindings (status message, busy flag).
-    ///   • Coordinate the password validation flow (cache-first strategy):
-    ///       1. Kick off Firebase fetch in the background immediately.
-    ///       2. Compare against local cache (instant, no network wait).
-    ///          – Cache hit  → unlock immediately; Firebase sync continues in background.
-    ///          – Cache miss → await the in-flight Firebase tasks, compare fresh values.
-    ///       3. If Firebase is also unavailable, retry against whatever the cache holds.
-    ///   • Trigger password rotation (<see cref="PasswordRotationService"/>) on
-    ///     success — only the matched password (current or backup) is rotated.
-    ///   • Raise <see cref="UnlockSucceeded"/> event for the View to close itself.
-    ///
-    /// Threading
-    /// ---------
-    ///   All public properties are updated on the UI thread via the captured
-    ///   <see cref="SynchronizationContext"/>.  Async command bodies run on
-    ///   the thread pool for I/O but marshal back for property updates.
+    /// Unlock paths
+    /// ------------
+    ///   1. Admin remote command (primary, online):
+    ///      <see cref="UnlockCommandService"/> raises an event → we fire
+    ///      <see cref="UnlockSucceeded"/> directly without prompting the user
+    ///      and WITHOUT rotating the offline PIN.
+    ///   2. Offline PIN (emergency, user-typed):
+    ///      User types the PIN into the PasswordBox → we compare against the
+    ///      cached and Firebase-fetched values.  On match, the PIN is rotated
+    ///      so it is single-use.
+    ///   3. Master password (break-glass):
+    ///      Always accepted as a fail-safe regardless of all other paths.
+    ///      Never triggers rotation.
     /// </summary>
     public sealed class LockViewModel : INotifyPropertyChanged
     {
@@ -40,25 +35,22 @@ namespace SecureDesktopLock.ViewModels
         // ------------------------------------------------------------------ //
         private readonly FirebaseService _firebaseService;
         private readonly EncryptionService _encryptionService;
-        private readonly PasswordRotationService _rotationService;
+        private readonly OfflinePinService _offlinePinService;
+        private readonly UnlockCommandService _unlockCommandService;
 
         /// <summary>
-        /// Master password loaded from the Firebase config JSON file at startup.
-        /// Always accepted as a fail-safe fallback regardless of mode.
-        /// To change it, update the <c>master_password</c> field in
-        /// <c>firebase_config.json</c> and restart the application.
+        /// Master password loaded from App.config.  Always accepted as a
+        /// fail-safe.  Empty string disables this path safely.
         /// </summary>
         private readonly string _masterPassword;
 
         // ------------------------------------------------------------------ //
         //  State                                                              //
         // ------------------------------------------------------------------ //
-        private string _statusMessage = string.Empty;
+        private string _statusMessage = "Đang chờ admin mở khóa…";
         private bool _isUnlocking = false;
         private int _failureCount = 0;
         private readonly string _machineId;
-
-        // UI-thread synchronisation context captured at construction time
         private readonly SynchronizationContext _uiContext;
 
         // ------------------------------------------------------------------ //
@@ -68,22 +60,22 @@ namespace SecureDesktopLock.ViewModels
         public LockViewModel(
             FirebaseService firebaseService,
             EncryptionService encryptionService,
-            PasswordRotationService rotationService)
+            OfflinePinService offlinePinService,
+            UnlockCommandService unlockCommandService)
         {
             _firebaseService = firebaseService
                 ?? throw new ArgumentNullException(nameof(firebaseService));
             _encryptionService = encryptionService
                 ?? throw new ArgumentNullException(nameof(encryptionService));
-            _rotationService = rotationService
-                ?? throw new ArgumentNullException(nameof(rotationService));
+            _offlinePinService = offlinePinService
+                ?? throw new ArgumentNullException(nameof(offlinePinService));
+            _unlockCommandService = unlockCommandService
+                ?? throw new ArgumentNullException(nameof(unlockCommandService));
 
             _machineId = MachineInfo.GetMachineId();
             _uiContext = SynchronizationContext.Current
                          ?? new SynchronizationContext();
 
-            // Load master password from App.config key "MasterPassword".
-            // Falls back to empty string if absent; an empty string will
-            // never match real user input so the app starts safely.
             _masterPassword = System.Configuration.ConfigurationManager
                                   .AppSettings["MasterPassword"]
                               ?? string.Empty;
@@ -93,77 +85,87 @@ namespace SecureDesktopLock.ViewModels
             else
                 Logger.LogInfo("[LockViewModel] Master password loaded from App.config.");
 
-            // --- Commands ---
             UnlockCommand = new RelayCommand(
                 execute: OnUnlockCommandExecuted,
                 canExecute: _ => !IsUnlocking);
+
+            // Subscribe to admin remote-unlock command.
+            _unlockCommandService.UnlockRequested += OnAdminUnlockRequested;
         }
 
         // ------------------------------------------------------------------ //
         //  Bindable properties                                                //
         // ------------------------------------------------------------------ //
 
-        /// <summary>
-        /// Status message displayed beneath the password box.
-        /// Updated after each validation attempt.
-        /// </summary>
         public string StatusMessage
         {
             get => _statusMessage;
             private set { _statusMessage = value; OnPropertyChanged(); }
         }
 
-        /// <summary>
-        /// <c>true</c> while an async unlock operation is in flight.
-        /// Disables the Unlock button and shows a visual busy state.
-        /// </summary>
         public bool IsUnlocking
         {
             get => _isUnlocking;
             private set { _isUnlocking = value; OnPropertyChanged(); }
         }
 
-        /// <summary>Current machine identifier (shown for diagnostics).</summary>
         public string MachineId => _machineId;
 
         // ------------------------------------------------------------------ //
         //  Commands                                                           //
         // ------------------------------------------------------------------ //
 
-        /// <summary>Bound to the "Unlock" button in the View.</summary>
         public ICommand UnlockCommand { get; }
 
         // ------------------------------------------------------------------ //
         //  Events                                                             //
         // ------------------------------------------------------------------ //
 
-        /// <summary>
-        /// Fired on the UI thread when authentication succeeds.
-        /// The View should close the lock window in response.
-        /// </summary>
         public event EventHandler UnlockSucceeded;
 
         // ------------------------------------------------------------------ //
-        //  Unlock flow                                                        //
+        //  Admin remote unlock                                                //
         // ------------------------------------------------------------------ //
 
         /// <summary>
-        /// Result of a password validation attempt indicating which password
-        /// (if any) was matched.
+        /// Called by <see cref="UnlockCommandService"/> on a background thread
+        /// when admin clicks "Unlock" on the dashboard.  No password prompt,
+        /// no PIN rotation — just close the lock window.
         /// </summary>
+        private void OnAdminUnlockRequested(object sender, EventArgs e)
+        {
+            PostToUi(() =>
+            {
+                StatusMessage = "Đã được admin mở khóa…";
+                UnlockSucceeded?.Invoke(this, EventArgs.Empty);
+            });
+
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    await Logger.LogUnlockSuccessAsync(_machineId, isMasterPassword: false)
+                        .ConfigureAwait(false);
+                    Logger.LogInfo("[LockViewModel] Unlocked via admin remote command.");
+                }
+                catch (Exception ex)
+                {
+                    Logger.LogError("Failed to log admin-unlock success.", ex);
+                }
+            });
+        }
+
+        // ------------------------------------------------------------------ //
+        //  Password / PIN unlock flow                                         //
+        // ------------------------------------------------------------------ //
+
         private enum PasswordMatchResult
         {
             NoMatch,
             MasterPassword,
-            CurrentPassword,
-            BackupPassword
+            OfflinePin
         }
 
-        /// <summary>
-        /// Entry-point called by the command binding.  Receives the
-        /// <see cref="SecureString"/> directly from the <c>PasswordBox</c>
-        /// via the CommandParameter binding (see LockWindow XAML).
-        /// </summary>
         private async void OnUnlockCommandExecuted(object parameter)
         {
             if (IsUnlocking) return;
@@ -171,43 +173,38 @@ namespace SecureDesktopLock.ViewModels
             SecureString securePassword = parameter as SecureString;
             if (securePassword == null || securePassword.Length == 0)
             {
-                StatusMessage = "Please enter the password.";
+                StatusMessage = "Vui lòng nhập PIN.";
                 return;
             }
 
             IsUnlocking = true;
-            StatusMessage = "Verifying…";
+            StatusMessage = "Đang xác thực…";
 
             try
             {
-                PasswordMatchResult result = await ValidatePasswordAsync(securePassword)
+                PasswordMatchResult result = await ValidatePinAsync(securePassword)
                     .ConfigureAwait(false);
 
                 if (result != PasswordMatchResult.NoMatch)
                 {
-                    // Close the lock screen immediately — the user should never
-                    // wait for rotation or logging.  Both are fire-and-forget.
                     PostToUi(() =>
                     {
-                        StatusMessage = "Unlocked — starting session…";
+                        StatusMessage = "Mở khóa thành công…";
                         UnlockSucceeded?.Invoke(this, EventArgs.Empty);
                     });
 
-                    // Rotation and logging run in the background after the
-                    // window is already gone.  Errors are logged but never
-                    // surfaced to the (now unlocked) user.
+                    // Background post-unlock: rotate only if matched OfflinePin.
                     _ = Task.Run(async () =>
                     {
                         try
                         {
-                            if (result == PasswordMatchResult.CurrentPassword)
-                                await _rotationService.RotateAsync(_machineId, isBackup: false)
-                                    .ConfigureAwait(false);
-                            else if (result == PasswordMatchResult.BackupPassword)
-                                await _rotationService.RotateAsync(_machineId, isBackup: true)
+                            if (result == PasswordMatchResult.OfflinePin)
+                                await _offlinePinService.RotateAsync(_machineId)
                                     .ConfigureAwait(false);
 
-                            await Logger.LogUnlockSuccessAsync(_machineId)
+                            await Logger.LogUnlockSuccessAsync(
+                                    _machineId,
+                                    isMasterPassword: result == PasswordMatchResult.MasterPassword)
                                 .ConfigureAwait(false);
                         }
                         catch (Exception ex)
@@ -221,7 +218,7 @@ namespace SecureDesktopLock.ViewModels
                     _failureCount++;
                     PostToUi(() =>
                     {
-                        StatusMessage = $"Incorrect password. (Attempt {_failureCount})";
+                        StatusMessage = $"PIN không đúng. (Lần {_failureCount})";
                         IsUnlocking = false;
                     });
 
@@ -234,204 +231,113 @@ namespace SecureDesktopLock.ViewModels
                 Logger.LogError("Unexpected error during unlock.", ex);
                 PostToUi(() =>
                 {
-                    StatusMessage = "An error occurred. Please try again.";
+                    StatusMessage = "Có lỗi xảy ra. Vui lòng thử lại.";
                     IsUnlocking = false;
                 });
             }
         }
 
         /// <summary>
-        /// Validates the entered password using a cache-first strategy.
-        ///
-        /// Flow
-        /// ----
-        ///   1. Firebase fetch tasks are started immediately (background).
-        ///   2. Local cache is read synchronously (no network cost).
-        ///   3. If the cache contains a match → return immediately; the
-        ///      in-flight Firebase tasks keep running to refresh the cache.
-        ///   4. If no cache match (or cache is cold) → await the Firebase
-        ///      tasks and compare against the fresh values.
-        ///   5. If Firebase is also unavailable → fall back to the already-read
-        ///      cache values (true offline mode).
-        ///
-        /// Also accepts the master password as an instant fail-safe regardless
-        /// of all other paths.
+        /// Validates the entered PIN against the master password and the
+        /// offline PIN (cache-first, Firebase-second).
         /// </summary>
-        private async Task<PasswordMatchResult> ValidatePasswordAsync(SecureString secureInput)
+        private async Task<PasswordMatchResult> ValidatePinAsync(SecureString secureInput)
         {
-            // Convert SecureString → plain-text (in a controlled scope)
-            string enteredPassword = SecureStringToString(secureInput);
+            string entered = SecureStringToString(secureInput);
 
-            // ----------------------------------------------------------------
-            // Master password: instant fail-safe, no cache/Firebase needed
-            // ----------------------------------------------------------------
+            // Master password — instant fail-safe.
             if (!string.IsNullOrEmpty(_masterPassword) &&
-                string.Equals(enteredPassword, _masterPassword, StringComparison.Ordinal))
+                string.Equals(entered, _masterPassword, StringComparison.Ordinal))
             {
-                enteredPassword = null;
-                await Logger.LogUnlockSuccessAsync(_machineId, isMasterPassword: true)
-                    .ConfigureAwait(false);
+                entered = null;
                 return PasswordMatchResult.MasterPassword;
             }
 
-            // ----------------------------------------------------------------
-            // Step 1: Kick off Firebase fetch in background immediately.
-            //         Do NOT await yet — we want the cache comparison to happen
-            //         in parallel while the network requests are in flight.
-            // ----------------------------------------------------------------
-            Task<string> firebaseCurrentTask = null;
-            Task<string> firebaseBackupTask = null;
+            // Kick off Firebase fetch in background; compare cache first.
+            Task<string> firebaseTask = null;
             try
             {
-                firebaseCurrentTask = _firebaseService.GetPasswordAsync(_machineId);
-                firebaseBackupTask = _firebaseService.GetBackupPasswordAsync(_machineId);
+                firebaseTask = _firebaseService.GetOfflinePinAsync(_machineId);
             }
             catch (Exception ex)
             {
-                Logger.LogFirebaseError(ex, "ValidatePassword.StartFirebaseFetch");
+                Logger.LogFirebaseError(ex, "ValidatePin.StartFetch");
             }
 
-            // ----------------------------------------------------------------
-            // Step 2: Read local cache synchronously (instant, no network).
-            // ----------------------------------------------------------------
-            string cachedCurrent = _rotationService.ReadCachedPassword();
-            string cachedBackup = _rotationService.ReadBackupCachedPassword();
+            string cached = _offlinePinService.ReadCachedPin();
 
-            // ----------------------------------------------------------------
-            // Step 3: Cache-first comparison.
-            //         If the cache has a match we unlock right away and let the
-            //         Firebase tasks finish in the background to keep the cache
-            //         fresh for the next unlock.
-            // ----------------------------------------------------------------
-            if (cachedCurrent != null || cachedBackup != null)
+            if (cached != null &&
+                ComparePin(entered, cached) == PasswordMatchResult.OfflinePin)
             {
-                PasswordMatchResult cacheResult =
-                    ComparePasswords(enteredPassword, cachedCurrent, cachedBackup);
-
-                if (cacheResult != PasswordMatchResult.NoMatch)
-                {
-                    // Sync Firebase → cache in background; don't block the unlock.
-                    _ = SyncCacheFromFirebaseAsync(firebaseCurrentTask, firebaseBackupTask);
-                    enteredPassword = null;
-                    return cacheResult;
-                }
+                _ = SyncCacheFromFirebaseAsync(firebaseTask);
+                entered = null;
+                return PasswordMatchResult.OfflinePin;
             }
 
-            // ----------------------------------------------------------------
-            // Step 4: Cache miss (cold start) or wrong password in cache.
-            //         Await the already-running Firebase tasks for fresh data.
-            // ----------------------------------------------------------------
-            string encryptedCurrent = null;
-            string encryptedBackup = null;
-
-            if (firebaseCurrentTask != null && firebaseBackupTask != null)
+            // Cache miss → wait for Firebase.
+            string fromFirebase = null;
+            if (firebaseTask != null)
             {
                 try
                 {
-                    await Task.WhenAll(firebaseCurrentTask, firebaseBackupTask)
-                        .ConfigureAwait(false);
-
-                    encryptedCurrent = firebaseCurrentTask.Result;
-                    encryptedBackup = firebaseBackupTask.Result;
-
-                    // Keep cache in sync
-                    if (encryptedCurrent != null)
-                        _rotationService.WriteCache(encryptedCurrent);
-                    if (encryptedBackup != null)
-                        _rotationService.WriteBackupCache(encryptedBackup);
+                    fromFirebase = await firebaseTask.ConfigureAwait(false);
+                    if (fromFirebase != null)
+                        _offlinePinService.WriteCache(fromFirebase);
                 }
                 catch (Exception ex)
                 {
-                    Logger.LogFirebaseError(ex, "ValidatePassword.AwaitFirebase");
+                    Logger.LogFirebaseError(ex, "ValidatePin.AwaitFetch");
                 }
             }
 
-            // ----------------------------------------------------------------
-            // Step 5: If Firebase returned nothing (offline), fall back to the
-            //         cache values that were already read in Step 2.
-            // ----------------------------------------------------------------
-            if (encryptedCurrent == null && encryptedBackup == null)
+            if (fromFirebase == null)
             {
-                encryptedCurrent = cachedCurrent;
-                encryptedBackup = cachedBackup;
+                fromFirebase = cached;
 
-                if (encryptedCurrent != null || encryptedBackup != null)
-                    PostToUi(() => StatusMessage = "Offline mode — using cached password.");
+                if (fromFirebase != null)
+                    PostToUi(() => StatusMessage = "Chế độ offline — dùng PIN đã cache.");
                 else
                 {
-                    enteredPassword = null;
+                    entered = null;
                     PostToUi(() => StatusMessage =
-                        "No password record found. Contact your administrator.");
+                        "Chưa có PIN cho máy này. Liên hệ admin.");
                     return PasswordMatchResult.NoMatch;
                 }
             }
 
             try
             {
-                return ComparePasswords(enteredPassword, encryptedCurrent, encryptedBackup);
+                return ComparePin(entered, fromFirebase);
             }
             finally
             {
-                enteredPassword = null;
+                entered = null;
             }
         }
 
-        /// <summary>
-        /// Compares <paramref name="enteredPassword"/> against the decrypted
-        /// current and backup passwords in order.
-        /// Returns the first match, or <see cref="PasswordMatchResult.NoMatch"/>.
-        /// </summary>
-        private PasswordMatchResult ComparePasswords(
-            string enteredPassword,
-            string encryptedCurrent,
-            string encryptedBackup)
+        private PasswordMatchResult ComparePin(string entered, string encryptedStored)
         {
-            if (encryptedCurrent != null &&
-                _encryptionService.TryDecrypt(encryptedCurrent, out string currentPlain))
-            {
-                bool match = string.Equals(enteredPassword, currentPlain, StringComparison.Ordinal);
-                currentPlain = null;
-                if (match) return PasswordMatchResult.CurrentPassword;
-            }
+            if (encryptedStored == null) return PasswordMatchResult.NoMatch;
 
-            if (encryptedBackup != null &&
-                _encryptionService.TryDecrypt(encryptedBackup, out string backupPlain))
-            {
-                bool match = string.Equals(enteredPassword, backupPlain, StringComparison.Ordinal);
-                backupPlain = null;
-                if (match) return PasswordMatchResult.BackupPassword;
-            }
+            if (!_encryptionService.TryDecrypt(encryptedStored, out string plain))
+                return PasswordMatchResult.NoMatch;
 
-            return PasswordMatchResult.NoMatch;
+            bool match = string.Equals(entered, plain, StringComparison.Ordinal);
+            plain = null;
+            return match ? PasswordMatchResult.OfflinePin : PasswordMatchResult.NoMatch;
         }
 
-        /// <summary>
-        /// Awaits the already-running Firebase tasks and writes their results
-        /// to the local cache.  Intended to be called fire-and-forget
-        /// (<c>_ = SyncCacheFromFirebaseAsync(…)</c>) after a cache-hit unlock
-        /// so the cache stays fresh without blocking the user.
-        /// All errors are caught and logged.
-        /// </summary>
-        private async Task SyncCacheFromFirebaseAsync(
-            Task<string> currentTask,
-            Task<string> backupTask)
+        private async Task SyncCacheFromFirebaseAsync(Task<string> fetchTask)
         {
-            if (currentTask == null || backupTask == null) return;
+            if (fetchTask == null) return;
             try
             {
-                await Task.WhenAll(currentTask, backupTask).ConfigureAwait(false);
-
-                string current = currentTask.Result;
-                string backup = backupTask.Result;
-
-                if (current != null) _rotationService.WriteCache(current);
-                if (backup != null) _rotationService.WriteBackupCache(backup);
-
-                Logger.LogInfo("[LockViewModel] Background Firebase→cache sync completed.");
+                string fresh = await fetchTask.ConfigureAwait(false);
+                if (fresh != null) _offlinePinService.WriteCache(fresh);
             }
             catch (Exception ex)
             {
-                Logger.LogFirebaseError(ex, "ValidatePassword.BackgroundCacheSync");
+                Logger.LogFirebaseError(ex, "ValidatePin.BackgroundCacheSync");
             }
         }
 
@@ -439,14 +345,6 @@ namespace SecureDesktopLock.ViewModels
         //  Helpers                                                            //
         // ------------------------------------------------------------------ //
 
-        /// <summary>
-        /// Converts a <see cref="SecureString"/> to a plain <see cref="string"/>.
-        ///
-        /// SECURITY NOTE: This temporarily exposes the password in managed
-        /// memory.  The string is dereferenced immediately after comparison.
-        /// On .NET Framework there is no safe way to avoid this for UI input —
-        /// WPF's PasswordBox already copies the value to managed memory.
-        /// </summary>
         private static string SecureStringToString(SecureString ss)
         {
             IntPtr ptr = System.Runtime.InteropServices.Marshal.SecureStringToGlobalAllocUnicode(ss);
@@ -460,9 +358,6 @@ namespace SecureDesktopLock.ViewModels
             }
         }
 
-        /// <summary>
-        /// Marshals an action back to the UI (dispatcher) thread.
-        /// </summary>
         private void PostToUi(Action action)
         {
             _uiContext.Post(_ => action(), null);
