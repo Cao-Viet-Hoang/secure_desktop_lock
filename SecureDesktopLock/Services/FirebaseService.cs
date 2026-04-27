@@ -345,15 +345,24 @@ namespace SecureDesktopLock.Services
             public string ExpiresAt { get; set; }
 
             /// <summary>
-            /// True when <see cref="ExpiresAt"/> is in the past.
-            /// Returns <c>false</c> if the field is missing or unparseable
+            /// Allowed clock skew between admin and target machine.
+            /// Tokens up to this far past their stated expiry are still
+            /// accepted; replay protection is provided separately by the
+            /// consumed-tokens cache in <c>UnlockCommandService</c>.
+            /// </summary>
+            private static readonly TimeSpan ClockSkewTolerance = TimeSpan.FromMinutes(10);
+
+            /// <summary>
+            /// True when <see cref="ExpiresAt"/> is more than
+            /// <see cref="ClockSkewTolerance"/> in the past.
+            /// Returns <c>true</c> if the field is missing or unparseable
             /// (treated as expired to be safe).
             /// </summary>
             public bool IsExpired()
             {
                 if (string.IsNullOrWhiteSpace(ExpiresAt)) return true;
                 if (!DateTimeOffset.TryParse(ExpiresAt, out var expires)) return true;
-                return DateTimeOffset.UtcNow > expires.ToUniversalTime();
+                return DateTimeOffset.UtcNow > expires.ToUniversalTime().Add(ClockSkewTolerance);
             }
         }
 

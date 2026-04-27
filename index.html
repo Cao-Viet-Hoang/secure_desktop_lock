@@ -1003,7 +1003,7 @@
     // ──── Constants ────
     const ONLINE_THRESHOLD_MS = 60_000;
     const STALE_THRESHOLD_MS  = 5 * 60_000;
-    const UNLOCK_TOKEN_TTL_MS = 60_000;
+    const UNLOCK_TOKEN_TTL_MS = 5 * 60_000;   // 5 min — tolerate small clock skew between admin & target machines
 
     // ──── State ────
     let config      = null;

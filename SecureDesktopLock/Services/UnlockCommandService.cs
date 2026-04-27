@@ -1,6 +1,7 @@
 using SecureDesktopLock.Utils;
 using System;
 using System.Collections.Generic;
+using System.Net.NetworkInformation;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -32,7 +33,8 @@ namespace SecureDesktopLock.Services
         // ------------------------------------------------------------------ //
 
         private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(3);
-        private static readonly TimeSpan TokenMemoryWindow = TimeSpan.FromMinutes(5);
+        private static readonly TimeSpan TokenMemoryWindow = TimeSpan.FromMinutes(10);
+        private static readonly TimeSpan NetworkProbeInterval = TimeSpan.FromSeconds(2);
 
         // ------------------------------------------------------------------ //
         //  Events                                                             //
@@ -107,6 +109,11 @@ namespace SecureDesktopLock.Services
 
         private async Task PollLoopAsync(CancellationToken ct)
         {
+            // After sleep/resume the network adapter often takes a few seconds
+            // to come back. Skip polling until the OS reports a network is up
+            // so we don't spam the log with DNS-resolution failures.
+            await WaitForNetworkAsync(ct).ConfigureAwait(false);
+
             while (!ct.IsCancellationRequested)
             {
                 try
@@ -131,6 +138,20 @@ namespace SecureDesktopLock.Services
                     return;
                 }
             }
+        }
+
+        private static async Task WaitForNetworkAsync(CancellationToken ct)
+        {
+            if (NetworkInterface.GetIsNetworkAvailable()) return;
+
+            Logger.LogInfo("[UnlockCommand] Waiting for network to become available…");
+            while (!ct.IsCancellationRequested && !NetworkInterface.GetIsNetworkAvailable())
+            {
+                try { await Task.Delay(NetworkProbeInterval, ct).ConfigureAwait(false); }
+                catch (OperationCanceledException) { return; }
+            }
+            if (!ct.IsCancellationRequested)
+                Logger.LogInfo("[UnlockCommand] Network available — beginning polling.");
         }
 
         private async Task CheckOnceAsync(CancellationToken ct)

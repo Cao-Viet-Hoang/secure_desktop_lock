@@ -1,5 +1,6 @@
 using SecureDesktopLock.Utils;
 using System;
+using System.Net.NetworkInformation;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -75,6 +76,19 @@ namespace SecureDesktopLock.Services
 
         private async Task RunAsync(CancellationToken ct)
         {
+            // After sleep/resume the network adapter often needs a few seconds.
+            // Wait until the OS reports a network is up before the first beat —
+            // otherwise we waste the immediate-beat on a guaranteed DNS failure.
+            if (!NetworkInterface.GetIsNetworkAvailable())
+            {
+                Logger.LogInfo("[Heartbeat] Waiting for network…");
+                while (!ct.IsCancellationRequested && !NetworkInterface.GetIsNetworkAvailable())
+                {
+                    try { await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false); }
+                    catch (OperationCanceledException) { return; }
+                }
+            }
+
             // Send an immediate beat so the dashboard sees us right away.
             try
             {
