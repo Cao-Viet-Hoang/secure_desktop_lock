@@ -225,7 +225,7 @@
 
                 <!-- Emergency PIN section -->
                 <TextBlock
-                    Text="HOẶC NHẬP PIN KHẨN CẤP"
+                    Text="OR ENTER EMERGENCY PIN"
                     FontSize="10"
                     FontWeight="SemiBold"
                     Foreground="{StaticResource TextSecondaryBrush}"
@@ -238,12 +238,12 @@
                     Style="{StaticResource LockPasswordBoxStyle}"
                     Height="48"
                     Margin="0,0,0,12"
-                    ToolTip="Liên hệ admin để lấy PIN khi không có Internet"/>
+                    ToolTip="Contact your admin to get the PIN when offline"/>
 
                 <!-- Unlock button -->
                 <Button
                     x:Name="UnlockButton"
-                    Content="MỞ KHÓA BẰNG PIN"
+                    Content="UNLOCK WITH PIN"
                     Style="{StaticResource UnlockButtonStyle}"
                     Height="42"
                     IsDefault="True"
@@ -273,7 +273,7 @@
             Margin="0,0,0,18"
             FontSize="11"
             Foreground="{StaticResource TextSecondaryBrush}"
-            Text="SecureDesktopLock  ·  Mở khóa từ xa qua dashboard"/>
+            Text="SecureDesktopLock  ·  Unlock remotely via dashboard"/>
 
     </Grid>
 </Window>

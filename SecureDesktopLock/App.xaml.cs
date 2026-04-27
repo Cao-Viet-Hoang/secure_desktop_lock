@@ -522,6 +522,9 @@ namespace SecureDesktopLock
             string machineId,
             CancellationToken ct = default)
             => System.Threading.Tasks.Task.FromResult<int?>(null);
+
+        public override System.Threading.Tasks.Task ClearLastSeenAsync(string machineId)
+            => System.Threading.Tasks.Task.CompletedTask;
     }
 }
 

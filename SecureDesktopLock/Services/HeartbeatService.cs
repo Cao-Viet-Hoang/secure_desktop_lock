@@ -61,6 +61,14 @@ namespace SecureDesktopLock.Services
                 _cts = null;
                 Logger.LogInfo("[Heartbeat] Stopped.");
             }
+
+            // Clear last_seen so the dashboard shows offline immediately
+            // instead of waiting up to 60 s for the timestamp to go stale.
+            _ = Task.Run(async () =>
+            {
+                try { await _firebase.ClearLastSeenAsync(_machineId).ConfigureAwait(false); }
+                catch (Exception ex) { Logger.LogError("[Heartbeat] ClearLastSeen failed.", ex); }
+            });
         }
 
         public void Dispose() => Stop();

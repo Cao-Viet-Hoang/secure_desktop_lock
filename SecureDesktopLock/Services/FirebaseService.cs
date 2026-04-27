@@ -229,6 +229,26 @@ namespace SecureDesktopLock.Services
             }
         }
 
+        /// <summary>
+        /// Deletes <c>last_seen</c> so the dashboard sees the machine as offline
+        /// immediately after unlock, without waiting for the 60-second threshold.
+        /// </summary>
+        public virtual async Task ClearLastSeenAsync(string machineId)
+        {
+            try
+            {
+                await _client
+                    .DeleteAsync($"machines/{machineId}/last_seen")
+                    .ConfigureAwait(false);
+
+                Logger.LogInfo($"[FireSharp] last_seen cleared for machines/{machineId}.");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogFirebaseError(ex, "FirebaseService.ClearLastSeenAsync");
+            }
+        }
+
         // ------------------------------------------------------------------ //
         //  Re-lock interval                                                   //
         // ------------------------------------------------------------------ //

@@ -122,7 +122,6 @@
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
             -webkit-text-size-adjust: 100%;
-            overflow-x: hidden;
             line-height: 1.5;
             letter-spacing: -0.01em;
         }
@@ -156,8 +155,10 @@
 
         /* APP BAR */
         header.appbar {
-            position: sticky;
+            position: fixed;
             top: 0;
+            left: 0;
+            right: 0;
             z-index: 50;
             backdrop-filter: blur(16px);
             -webkit-backdrop-filter: blur(16px);
@@ -170,6 +171,8 @@
             justify-content: space-between;
             gap: 16px;
         }
+
+        body { padding-top: 68px; }
         .brand {
             display: flex;
             align-items: center;
@@ -864,7 +867,7 @@
             <svg class="icon" id="themeIcon"><use href="#i-sun"/></svg>
         </button>
         <div class="appbar-actions" id="appbarActions">
-            <button class="btn-icon" onclick="fetchMachines()" title="Refresh data" aria-label="Refresh">
+            <button class="btn-icon" id="refreshBtn" onclick="manualRefresh(this)" title="Refresh data" aria-label="Refresh">
                 <svg class="icon"><use href="#i-refresh"/></svg>
             </button>
             <button class="btn-icon" onclick="logout()" title="Sign out" aria-label="Sign out">
@@ -1372,6 +1375,24 @@
         const day = Math.floor(hr / 24);
         return `${day} day${day === 1 ? '' : 's'} ago`;
     }
+
+    // ───────────────────────────────────────────────────────────
+    //  MANUAL REFRESH
+    // ───────────────────────────────────────────────────────────
+    window.manualRefresh = async function (btn) {
+        if (btn.disabled) return;
+        const svg = btn.querySelector('svg');
+        btn.disabled = true;
+        svg.style.animation = 'spin .7s linear infinite';
+        try {
+            await fetchMachines();
+        } catch (err) {
+            showToast('Refresh failed: ' + err.message, 'error');
+        } finally {
+            btn.disabled = false;
+            svg.style.animation = '';
+        }
+    };
 
     // ───────────────────────────────────────────────────────────
     //  AUTO REFRESH

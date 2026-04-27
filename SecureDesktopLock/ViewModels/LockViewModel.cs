@@ -47,9 +47,10 @@ namespace SecureDesktopLock.ViewModels
         // ------------------------------------------------------------------ //
         //  State                                                              //
         // ------------------------------------------------------------------ //
-        private string _statusMessage = "Đang chờ admin mở khóa…";
+        private string _statusMessage = "Waiting for admin to unlock…";
         private bool _isUnlocking = false;
         private int _failureCount = 0;
+        private volatile bool _alreadyUnlocked = false;
         private readonly string _machineId;
         private readonly SynchronizationContext _uiContext;
 
@@ -134,9 +135,12 @@ namespace SecureDesktopLock.ViewModels
         /// </summary>
         private void OnAdminUnlockRequested(object sender, EventArgs e)
         {
+            if (_alreadyUnlocked) return;
+            _alreadyUnlocked = true;
+
             PostToUi(() =>
             {
-                StatusMessage = "Đã được admin mở khóa…";
+                StatusMessage = "Unlocked by admin…";
                 UnlockSucceeded?.Invoke(this, EventArgs.Empty);
             });
 
@@ -173,12 +177,12 @@ namespace SecureDesktopLock.ViewModels
             SecureString securePassword = parameter as SecureString;
             if (securePassword == null || securePassword.Length == 0)
             {
-                StatusMessage = "Vui lòng nhập PIN.";
+                StatusMessage = "Please enter your PIN.";
                 return;
             }
 
             IsUnlocking = true;
-            StatusMessage = "Đang xác thực…";
+            StatusMessage = "Verifying…";
 
             try
             {
@@ -187,9 +191,11 @@ namespace SecureDesktopLock.ViewModels
 
                 if (result != PasswordMatchResult.NoMatch)
                 {
+                    _alreadyUnlocked = true;
+
                     PostToUi(() =>
                     {
-                        StatusMessage = "Mở khóa thành công…";
+                        StatusMessage = "Unlocked successfully…";
                         UnlockSucceeded?.Invoke(this, EventArgs.Empty);
                     });
 
@@ -218,7 +224,7 @@ namespace SecureDesktopLock.ViewModels
                     _failureCount++;
                     PostToUi(() =>
                     {
-                        StatusMessage = $"PIN không đúng. (Lần {_failureCount})";
+                        StatusMessage = $"Incorrect PIN. (Attempt {_failureCount})";
                         IsUnlocking = false;
                     });
 
@@ -231,7 +237,7 @@ namespace SecureDesktopLock.ViewModels
                 Logger.LogError("Unexpected error during unlock.", ex);
                 PostToUi(() =>
                 {
-                    StatusMessage = "Có lỗi xảy ra. Vui lòng thử lại.";
+                    StatusMessage = "An unexpected error occurred. Please try again.";
                     IsUnlocking = false;
                 });
             }
@@ -295,12 +301,12 @@ namespace SecureDesktopLock.ViewModels
                 fromFirebase = cached;
 
                 if (fromFirebase != null)
-                    PostToUi(() => StatusMessage = "Chế độ offline — dùng PIN đã cache.");
+                    PostToUi(() => StatusMessage = "Offline mode — using cached PIN.");
                 else
                 {
                     entered = null;
                     PostToUi(() => StatusMessage =
-                        "Chưa có PIN cho máy này. Liên hệ admin.");
+                        "No PIN available for this machine. Contact your admin.");
                     return PasswordMatchResult.NoMatch;
                 }
             }
