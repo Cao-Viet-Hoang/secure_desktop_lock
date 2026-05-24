@@ -138,9 +138,9 @@ namespace SecureDesktopLock.ViewModels
             get
             {
                 if (_unlockCountRemaining < 0) return string.Empty;
-                if (_unlockCountRemaining == 0) return "Mã đã hết lượt sử dụng. Liên hệ admin.";
-                if (_unlockCountRemaining == 1) return "Đây là lần cuối dùng mã này.";
-                return $"Còn {_unlockCountRemaining} lần dùng mã này.";
+                if (_unlockCountRemaining == 0) return "PIN usage limit reached. Contact your admin.";
+                if (_unlockCountRemaining == 1) return "This is the last available unlock.";
+                return $"{_unlockCountRemaining} PIN unlocks remaining.";
             }
         }
 
@@ -227,7 +227,7 @@ namespace SecureDesktopLock.ViewModels
                 {
                     PostToUi(() =>
                     {
-                        StatusMessage = "Mã đã hết lượt sử dụng. Liên hệ admin.";
+                        StatusMessage = "PIN usage limit reached. Contact your admin.";
                         IsUnlocking = false;
                     });
                     return;
