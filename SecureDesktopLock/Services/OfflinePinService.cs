@@ -1,7 +1,6 @@
 using SecureDesktopLock.Utils;
 using System;
 using System.IO;
-using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -9,48 +8,43 @@ using System.Threading.Tasks;
 namespace SecureDesktopLock.Services
 {
     /// <summary>
-    /// Manages the per-machine offline PIN — the only password the user can
-    /// type on the lock screen.  Used as an emergency fallback when Firebase
-    /// is unreachable and the admin remote-unlock command cannot be delivered.
+    /// Manages the per-machine offline PIN and its remaining unlock count.
     ///
-    /// Lifecycle
-    /// ---------
-    ///   • Seeded on first boot if Firebase has no <c>offline_pin</c> node.
-    ///   • Synced from Firebase to the local cache on every successful fetch.
-    ///   • Rotated only when the user successfully types it (single-use after
-    ///     each consumption).
+    /// The PIN is now fixed and set by the admin via the dashboard (no longer
+    /// randomly rotated after each use).  Each successful PIN unlock decrements
+    /// the count by one; when the count reaches zero the PIN is blocked.
     ///
-    /// Conflict resolution (offline rotation)
-    /// --------------------------------------
-    ///   When the user unlocks with the PIN while Firebase is unreachable,
-    ///   a new PIN is generated and written to the cache, plus a
-    ///   <c>offline_pin.pending</c> flag file.  On the next successful Firebase
-    ///   reach (boot or first network call), the pending PIN is pushed up
-    ///   BEFORE any pull, so the local rotation is never overwritten by the
-    ///   stale Firebase value.
+    /// Sync strategy for unlock_count
+    /// --------------------------------
+    ///   Online unlock  : decrement Firebase directly, update local cache.
+    ///   Offline unlock : decrement local cache, increment pending-decrements
+    ///                    counter stored in <c>unlock_count.pending</c>.
+    ///   On reconnect   : fetch Firebase count, subtract pending decrements,
+    ///                    push result, clear pending file.
+    ///                    Formula: new = max(0, firebase_count − pending)
+    ///                    This correctly handles admin resets that happen while
+    ///                    the machine is offline.
     /// </summary>
     public sealed class OfflinePinService
     {
         // ------------------------------------------------------------------ //
-        //  Configuration                                                      //
+        //  File paths                                                         //
         // ------------------------------------------------------------------ //
 
-        public const int PinLength = 6;
-        private const string CharPool = "0123456789";
-
-        /// <summary>Cache file containing the encrypted offline PIN.</summary>
         public static readonly string CachePath =
             Path.Combine(Logger.DataRoot, "offline_pin.dat");
 
-        /// <summary>Pending-sync marker.  Holds the rotated PIN that has not
-        /// yet been pushed to Firebase.  Existence implies a sync is needed.</summary>
-        public static readonly string PendingPath =
-            Path.Combine(Logger.DataRoot, "offline_pin.pending");
+        public static readonly string CountCachePath =
+            Path.Combine(Logger.DataRoot, "unlock_count.dat");
 
-        /// <summary>Maximum number of retry attempts for the initial seed.</summary>
+        /// <summary>
+        /// Stores how many PIN unlocks occurred while Firebase was unreachable.
+        /// Cleared after the pending decrements are successfully synced.
+        /// </summary>
+        public static readonly string CountPendingPath =
+            Path.Combine(Logger.DataRoot, "unlock_count.pending");
+
         private const int SeedMaxRetries = 3;
-
-        /// <summary>Delay between seed retries (doubles each attempt).</summary>
         private static readonly TimeSpan SeedRetryBaseDelay = TimeSpan.FromSeconds(5);
 
         // ------------------------------------------------------------------ //
@@ -71,124 +65,72 @@ namespace SecureDesktopLock.Services
         }
 
         // ------------------------------------------------------------------ //
-        //  Public API                                                         //
+        //  Startup initialisation                                             //
         // ------------------------------------------------------------------ //
 
         /// <summary>
-        /// Generates a new PIN, pushes it to Firebase, and writes the cache.
-        /// Called immediately after a successful offline-PIN unlock so each
-        /// PIN is single-use.
-        ///
-        /// If Firebase is unreachable, the new PIN is still cached locally
-        /// and a <c>pending</c> marker is written so the next online run
-        /// pushes the rotation up before pulling.
-        /// </summary>
-        public async Task RotateAsync(string machineId, CancellationToken ct = default)
-        {
-            string newPin = GenerateSecurePin();
-            string encrypted = _encryptionService.Encrypt(newPin);
-
-            bool savedRemotely = false;
-
-            try
-            {
-                await _firebaseService
-                    .SetOfflinePinAsync(machineId, encrypted, ct)
-                    .ConfigureAwait(false);
-                savedRemotely = true;
-            }
-            catch (Exception ex)
-            {
-                Logger.LogFirebaseError(ex, "OfflinePinService.RotateAsync.Upload");
-            }
-
-            // Always write cache (authoritative for local unlock until next sync).
-            try
-            {
-                WriteCache(encrypted);
-            }
-            catch (Exception ex)
-            {
-                Logger.LogError("Failed to write offline_pin cache.", ex);
-            }
-
-            // If Firebase failed, mark pending so we push on next successful reach.
-            if (!savedRemotely)
-            {
-                try
-                {
-                    WritePending(encrypted);
-                    Logger.LogWarning(
-                        $"Offline PIN rotated locally but NOT pushed to Firebase. " +
-                        $"Pending sync queued. machineId={machineId}");
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogError("Failed to write offline_pin pending marker.", ex);
-                }
-            }
-            else
-            {
-                ClearPending();
-                Logger.LogInfo($"Offline PIN rotated successfully for machineId={machineId}");
-            }
-        }
-
-        /// <summary>
-        /// Ensures Firebase has an <c>offline_pin</c> for this machine.  If a
-        /// pending local rotation exists from a previous offline unlock, push
-        /// it up FIRST so the latest local value wins. Then, if Firebase still
-        /// has no value, seed a fresh PIN.
+        /// Syncs PIN and unlock_count from Firebase to the local cache on startup.
+        /// If pending offline decrements exist, they are pushed to Firebase first
+        /// (so a reset by the admin is correctly factored in).
         ///
         /// Safe to call fire-and-forget — all errors are caught and logged.
         /// </summary>
-        public async Task EnsurePinExistsAsync(string machineId, CancellationToken ct = default)
+        public async Task InitializeAsync(string machineId, CancellationToken ct = default)
         {
             for (int attempt = 1; attempt <= SeedMaxRetries; attempt++)
             {
                 try
                 {
                     Logger.LogInfo(
-                        $"EnsurePinExists: attempt {attempt}/{SeedMaxRetries} for machineId={machineId}.");
+                        $"OfflinePinService.Initialize: attempt {attempt}/{SeedMaxRetries} for machineId={machineId}.");
 
                     if (!await _firebaseService.IsAvailableAsync(ct).ConfigureAwait(false))
                     {
                         Logger.LogWarning(
-                            $"EnsurePinExists: Firebase unreachable on attempt {attempt}/{SeedMaxRetries}.");
+                            $"OfflinePinService.Initialize: Firebase unreachable on attempt {attempt}/{SeedMaxRetries}.");
 
                         if (attempt < SeedMaxRetries)
                         {
                             var delay = TimeSpan.FromTicks(SeedRetryBaseDelay.Ticks * (1 << (attempt - 1)));
-                            Logger.LogInfo($"EnsurePinExists: retrying in {delay.TotalSeconds}s…");
+                            Logger.LogInfo($"OfflinePinService.Initialize: retrying in {delay.TotalSeconds}s…");
                             await Task.Delay(delay, ct).ConfigureAwait(false);
                             continue;
                         }
 
                         Logger.LogError(
-                            $"EnsurePinExists: all {SeedMaxRetries} attempts failed — Firebase unreachable.");
+                            $"OfflinePinService.Initialize: all {SeedMaxRetries} attempts failed — staying offline.");
                         return;
                     }
 
-                    // ── 1. Push any pending rotation BEFORE pulling ─────────
-                    string pending = ReadPending();
-                    if (pending != null)
+                    // ── 1. Resolve pending count decrements ─────────────────
+                    int pending = ReadPendingDecrements();
+                    if (pending > 0)
                     {
                         Logger.LogInfo(
-                            $"EnsurePinExists: pending offline rotation found — pushing to Firebase.");
+                            $"OfflinePinService.Initialize: {pending} pending decrement(s) found — syncing.");
                         try
                         {
-                            await _firebaseService
-                                .SetOfflinePinAsync(machineId, pending, ct)
+                            int? firebaseCount = await _firebaseService
+                                .GetUnlockCountAsync(machineId, ct)
                                 .ConfigureAwait(false);
-                            ClearPending();
-                            // Cache is already up-to-date with the pending value.
-                            Logger.LogInfo("EnsurePinExists: pending rotation synced.");
-                            return;
+
+                            int resolved = firebaseCount.HasValue
+                                ? Math.Max(0, firebaseCount.Value - pending)
+                                : 0;
+
+                            await _firebaseService
+                                .SetUnlockCountAsync(machineId, resolved, ct)
+                                .ConfigureAwait(false);
+
+                            WriteCountCache(resolved);
+                            ClearPendingDecrements();
+                            Logger.LogInfo(
+                                $"OfflinePinService.Initialize: pending decrements synced. " +
+                                $"firebase={firebaseCount}, pending={pending}, resolved={resolved}.");
                         }
                         catch (Exception ex)
                         {
-                            Logger.LogFirebaseError(ex, "EnsurePinExists.PushPending");
-                            // Fall through and retry on next attempt.
+                            Logger.LogFirebaseError(ex, "OfflinePinService.Initialize.SyncPending");
                             if (attempt < SeedMaxRetries)
                             {
                                 var d = TimeSpan.FromTicks(SeedRetryBaseDelay.Ticks * (1 << (attempt - 1)));
@@ -199,43 +141,63 @@ namespace SecureDesktopLock.Services
                         }
                     }
 
-                    // ── 2. Seed if Firebase has nothing ─────────────────────
-                    string existing = await _firebaseService
-                        .GetOfflinePinAsync(machineId, ct)
-                        .ConfigureAwait(false);
-
-                    if (existing != null)
+                    // ── 2. Pull PIN from Firebase ────────────────────────────
+                    try
                     {
-                        Logger.LogInfo(
-                            $"EnsurePinExists: offline PIN already exists for machineId={machineId}.");
-                        // Refresh local cache from Firebase.
-                        WriteCache(existing);
-                    }
-                    else
-                    {
-                        Logger.LogInfo(
-                            $"EnsurePinExists: no offline PIN for machineId={machineId} — auto-seeding.");
-
-                        string newPin = GenerateSecurePin();
-                        string stored = _encryptionService.Encrypt(newPin);
-
-                        await _firebaseService
-                            .SetOfflinePinAsync(machineId, stored, ct)
+                        string pin = await _firebaseService
+                            .GetOfflinePinAsync(machineId, ct)
                             .ConfigureAwait(false);
 
-                        WriteCache(stored);
-
-                        Logger.LogInfo(
-                            $"EnsurePinExists: auto-seeded offline PIN for machineId={machineId}. " +
-                            $"PIN (plaintext): {newPin}");
+                        if (pin != null)
+                        {
+                            WriteCache(pin);
+                            Logger.LogInfo($"OfflinePinService.Initialize: PIN cache refreshed for machineId={machineId}.");
+                        }
+                        else
+                        {
+                            Logger.LogWarning(
+                                $"OfflinePinService.Initialize: no offline_pin set on Firebase for machineId={machineId}. " +
+                                "Admin must configure a PIN via the dashboard.");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogFirebaseError(ex, "OfflinePinService.Initialize.FetchPin");
                     }
 
-                    return; // Success
+                    // ── 3. Pull unlock_count from Firebase (if no pending) ───
+                    if (pending == 0)
+                    {
+                        try
+                        {
+                            int? count = await _firebaseService
+                                .GetUnlockCountAsync(machineId, ct)
+                                .ConfigureAwait(false);
+
+                            if (count.HasValue)
+                            {
+                                WriteCountCache(count.Value);
+                                Logger.LogInfo(
+                                    $"OfflinePinService.Initialize: unlock_count={count.Value} cached for machineId={machineId}.");
+                            }
+                            else
+                            {
+                                Logger.LogWarning(
+                                    $"OfflinePinService.Initialize: no unlock_count set on Firebase for machineId={machineId}.");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.LogFirebaseError(ex, "OfflinePinService.Initialize.FetchCount");
+                        }
+                    }
+
+                    return; // success
                 }
                 catch (Exception ex)
                 {
                     Logger.LogError(
-                        $"EnsurePinExists: attempt {attempt}/{SeedMaxRetries} failed.", ex);
+                        $"OfflinePinService.Initialize: attempt {attempt}/{SeedMaxRetries} failed.", ex);
 
                     if (attempt < SeedMaxRetries)
                     {
@@ -248,7 +210,104 @@ namespace SecureDesktopLock.Services
         }
 
         // ------------------------------------------------------------------ //
-        //  Cache I/O                                                          //
+        //  Decrement on unlock                                                //
+        // ------------------------------------------------------------------ //
+
+        /// <summary>
+        /// Synchronously decrements the local unlock-count cache by one and
+        /// records a pending decrement.  Returns the new cached count, or -1 if
+        /// the write failed.
+        ///
+        /// The pending file is written BEFORE the cache file.  If the process
+        /// crashes between the two writes, startup will still see the pending
+        /// decrement and reconcile via <see cref="FlushPendingDecrementsAsync"/>
+        /// (otherwise the user would get a free unlock after restart because the
+        /// authoritative Firebase value would overwrite the locally-decremented
+        /// cache).
+        /// </summary>
+        public int DecrementLocalCache()
+        {
+            try
+            {
+                int? cached = ReadCachedCount();
+                int newLocal = cached.HasValue ? Math.Max(0, cached.Value - 1) : 0;
+
+                // pending FIRST — crash-safety invariant
+                int pending = ReadPendingDecrements() + 1;
+                WritePendingDecrements(pending);
+                WriteCountCache(newLocal);
+
+                Logger.LogInfo(
+                    $"OfflinePinService.DecrementLocalCache: cache={newLocal}, pending={pending}.");
+                return newLocal;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("OfflinePinService.DecrementLocalCache: failed to write state.", ex);
+                return -1;
+            }
+        }
+
+        /// <summary>
+        /// Pushes any pending offline decrements to Firebase.
+        /// No-op if there are no pending decrements or Firebase is unreachable.
+        /// On success the cache is updated to the resolved count and the
+        /// pending file is cleared.
+        /// </summary>
+        public async Task FlushPendingDecrementsAsync(string machineId, CancellationToken ct = default)
+        {
+            int pending = ReadPendingDecrements();
+            if (pending == 0) return;
+
+            bool online = false;
+            try
+            {
+                online = await _firebaseService.IsAvailableAsync(ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogFirebaseError(ex, "OfflinePinService.Flush.IsAvailable");
+            }
+
+            if (!online)
+            {
+                Logger.LogInfo(
+                    $"OfflinePinService.Flush: Firebase unavailable; {pending} decrement(s) deferred.");
+                return;
+            }
+
+            try
+            {
+                int? firebaseCount = await _firebaseService
+                    .GetUnlockCountAsync(machineId, ct)
+                    .ConfigureAwait(false);
+
+                int resolved = firebaseCount.HasValue
+                    ? Math.Max(0, firebaseCount.Value - pending)
+                    : 0;
+
+                await _firebaseService
+                    .SetUnlockCountAsync(machineId, resolved, ct)
+                    .ConfigureAwait(false);
+
+                WriteCountCache(resolved);
+                ClearPendingDecrements();
+
+                Logger.LogInfo(
+                    $"OfflinePinService.Flush: synced {pending} decrement(s). " +
+                    $"firebase={firebaseCount}, resolved={resolved}, machineId={machineId}.");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogFirebaseError(ex, "OfflinePinService.Flush");
+            }
+        }
+
+        /// <summary>True when there are unsynced offline decrements on disk.</summary>
+        public bool HasPendingDecrements() => ReadPendingDecrements() > 0;
+
+        // ------------------------------------------------------------------ //
+        //  PIN cache I/O                                                      //
         // ------------------------------------------------------------------ //
 
         public string ReadCachedPin()
@@ -273,68 +332,74 @@ namespace SecureDesktopLock.Services
         }
 
         // ------------------------------------------------------------------ //
-        //  Pending-sync marker                                                //
+        //  Count cache I/O                                                    //
         // ------------------------------------------------------------------ //
 
-        private static string ReadPending()
+        public int? ReadCachedCount()
         {
             try
             {
-                if (!File.Exists(PendingPath)) return null;
-                string blob = File.ReadAllText(PendingPath, Encoding.UTF8).Trim();
-                return string.IsNullOrEmpty(blob) ? null : blob;
+                if (!File.Exists(CountCachePath)) return null;
+                string text = File.ReadAllText(CountCachePath, Encoding.UTF8).Trim();
+                if (int.TryParse(text, out int val)) return val;
+                return null;
             }
             catch (Exception ex)
             {
-                Logger.LogError("Failed to read offline_pin.pending.", ex);
+                Logger.LogError("Failed to read unlock_count cache.", ex);
                 return null;
             }
         }
 
-        private static void WritePending(string encryptedBlob)
-        {
-            EnsureDir();
-            File.WriteAllText(PendingPath, encryptedBlob, Encoding.UTF8);
-        }
-
-        private static void ClearPending()
+        public void WriteCountCache(int count)
         {
             try
             {
-                if (File.Exists(PendingPath))
-                    File.Delete(PendingPath);
+                EnsureDir();
+                File.WriteAllText(CountCachePath, count.ToString(), Encoding.UTF8);
             }
             catch (Exception ex)
             {
-                Logger.LogError("Failed to delete offline_pin.pending.", ex);
+                Logger.LogError("Failed to write unlock_count cache.", ex);
             }
         }
 
         // ------------------------------------------------------------------ //
-        //  PIN generation                                                     //
+        //  Pending-decrements I/O                                             //
         // ------------------------------------------------------------------ //
 
-        /// <summary>
-        /// Cryptographically random numeric PIN of <see cref="PinLength"/>
-        /// digits, drawn via rejection sampling from <see cref="CharPool"/>
-        /// to avoid modulo bias.
-        /// </summary>
-        public static string GenerateSecurePin()
+        private int ReadPendingDecrements()
         {
-            int poolLen = CharPool.Length;
-            int maxValue = byte.MaxValue - (byte.MaxValue % poolLen) - 1;
-            var result = new StringBuilder(PinLength);
-            var rng = new RNGCryptoServiceProvider();
-            byte[] buffer = new byte[1];
-
-            while (result.Length < PinLength)
+            try
             {
-                rng.GetBytes(buffer);
-                if (buffer[0] <= maxValue)
-                    result.Append(CharPool[buffer[0] % poolLen]);
+                if (!File.Exists(CountPendingPath)) return 0;
+                string text = File.ReadAllText(CountPendingPath, Encoding.UTF8).Trim();
+                return int.TryParse(text, out int val) ? Math.Max(0, val) : 0;
             }
+            catch (Exception ex)
+            {
+                Logger.LogError("Failed to read unlock_count.pending.", ex);
+                return 0;
+            }
+        }
 
-            return result.ToString();
+        private void WritePendingDecrements(int count)
+        {
+            EnsureDir();
+            File.WriteAllText(CountPendingPath, count.ToString(), Encoding.UTF8);
+        }
+
+        private void ClearPendingDecrements()
+        {
+            try
+            {
+                if (File.Exists(CountPendingPath))
+                    File.Delete(CountPendingPath);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError("Failed to delete unlock_count.pending.", ex);
+            }
         }
 
         // ------------------------------------------------------------------ //

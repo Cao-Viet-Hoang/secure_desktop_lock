@@ -17,7 +17,8 @@ namespace SecureDesktopLock.Services
     ///
     /// Realtime Database layout
     /// ------------------------
-    ///   machines/{machineId}/offline_pin            : string  (rotated when typed by user)
+    ///   machines/{machineId}/offline_pin            : string  (fixed PIN set by admin via dashboard)
+    ///   machines/{machineId}/unlock_count           : int     (remaining PIN unlocks; 0 = blocked)
     ///   machines/{machineId}/unlock_request         : object  (single-use admin command)
     ///       ├── token                               : string  (32 hex random)
     ///       ├── issued_at                           : string  (ISO-8601 GMT+7)
@@ -140,6 +141,72 @@ namespace SecureDesktopLock.Services
             catch (Exception ex)
             {
                 Logger.LogFirebaseError(ex, "FirebaseService.SetOfflinePinAsync");
+                throw;
+            }
+        }
+
+        // ------------------------------------------------------------------ //
+        //  Unlock count                                                       //
+        // ------------------------------------------------------------------ //
+
+        /// <summary>
+        /// Fetches the remaining PIN unlock count for this machine.
+        /// Returns <c>null</c> when the node has never been set by the admin.
+        /// </summary>
+        public virtual async Task<int?> GetUnlockCountAsync(
+            string machineId,
+            CancellationToken ct = default)
+        {
+            try
+            {
+                var response = await _client
+                    .GetAsync($"machines/{machineId}/unlock_count")
+                    .ConfigureAwait(false);
+
+                string body = response?.Body;
+                if (string.IsNullOrWhiteSpace(body) || body == "null")
+                    return null;
+
+                try
+                {
+                    return response.ResultAs<int>();
+                }
+                catch
+                {
+                    string cleaned = body.Trim().Trim('"');
+                    if (int.TryParse(cleaned, out int parsed))
+                        return parsed;
+
+                    Logger.LogWarning($"[FireSharp] Could not parse unlock_count body: '{body}'");
+                    return null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogFirebaseError(ex, "FirebaseService.GetUnlockCountAsync");
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Writes the remaining PIN unlock count for this machine.
+        /// </summary>
+        public virtual async Task SetUnlockCountAsync(
+            string machineId,
+            int count,
+            CancellationToken ct = default)
+        {
+            try
+            {
+                await _client
+                    .SetAsync($"machines/{machineId}/unlock_count", count)
+                    .ConfigureAwait(false);
+
+                Logger.LogInfo($"[FireSharp] unlock_count set to {count} for machines/{machineId}.");
+            }
+            catch (Exception ex)
+            {
+                Logger.LogFirebaseError(ex, "FirebaseService.SetUnlockCountAsync");
                 throw;
             }
         }

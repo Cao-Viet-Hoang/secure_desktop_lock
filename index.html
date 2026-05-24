@@ -623,6 +623,96 @@
             border-color: var(--success);
         }
 
+        .pin-input {
+            flex: 1;
+            min-width: 0;
+            background: var(--surface);
+            border: 1.5px solid var(--border);
+            border-radius: 7px;
+            padding: 6px 10px;
+            font-family: var(--font-mono);
+            font-size: .92rem;
+            font-weight: 600;
+            letter-spacing: .08em;
+            color: var(--text);
+            -moz-appearance: textfield;
+        }
+        .pin-input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, .12);
+        }
+        .pin-save {
+            background: var(--success);
+            color: #fff;
+            border-radius: 7px;
+            width: 30px; height: 30px;
+            display: none;
+            place-items: center;
+            transition: all .15s ease;
+            flex-shrink: 0;
+        }
+        .pin-save:hover { background: var(--success-ink); }
+        .pin-save.visible { display: grid; }
+
+        .count-row {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .count-input {
+            width: 56px;
+            background: var(--surface);
+            border: 1.5px solid var(--border);
+            border-radius: 7px;
+            padding: 6px 8px;
+            font-family: var(--font-mono);
+            font-size: .92rem;
+            font-weight: 600;
+            text-align: center;
+            color: var(--text);
+            -moz-appearance: textfield;
+        }
+        .count-input::-webkit-outer-spin-button,
+        .count-input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        .count-input:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(99, 102, 241, .12);
+        }
+        .count-unit {
+            font-size: .8rem;
+            color: var(--text-soft);
+            font-weight: 500;
+        }
+        .count-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: .72rem;
+            font-weight: 600;
+            background: var(--warning-soft);
+            color: var(--warning-ink);
+            margin-left: 4px;
+        }
+        .count-badge.zero {
+            background: var(--danger-soft);
+            color: var(--danger-ink);
+        }
+        .count-save {
+            margin-left: auto;
+            background: var(--success);
+            color: #fff;
+            border-radius: 7px;
+            width: 30px; height: 30px;
+            display: none;
+            place-items: center;
+            transition: all .15s ease;
+        }
+        .count-save:hover { background: var(--success-ink); }
+        .count-save.visible { display: grid; }
+
         .relock-row {
             display: flex;
             align-items: center;
@@ -1209,6 +1299,7 @@
             machines.push({
                 id,
                 offline_pin:          value.offline_pin           ?? null,
+                unlock_count:         value.unlock_count          ?? null,
                 last_seen:            value.last_seen             ?? null,
                 last_updated:         value.last_updated          ?? null,
                 relock_after_seconds: value.relock_after_seconds  ?? 0,
@@ -1226,7 +1317,8 @@
         const list  = $('machineList');
         const query = ($('searchInput').value || '').toLowerCase().trim();
         const filtered = machines.filter(m =>
-            m.id.toLowerCase().includes(query) || (m.offline_pin || '').toLowerCase().includes(query)
+            m.id.toLowerCase().includes(query) ||
+            (m.offline_pin || '').toLowerCase().includes(query)
         );
 
         if (filtered.length === 0) {
@@ -1246,6 +1338,10 @@
         const seenAgo   = m.last_seen ? timeAgo(m.last_seen) : 'Never connected';
         const online    = status.cls === 'online';
 
+        const pinVal      = m.offline_pin || '';
+        const countVal    = m.unlock_count ?? '';
+        const countIsZero = m.unlock_count === 0;
+
         return `
         <div class="machine-card ${status.cls}">
             <div class="card-head">
@@ -1262,8 +1358,39 @@
                 <div class="info-block">
                     <div class="info-label"><svg class="icon sm"><use href="#i-pin"/></svg>Offline PIN</div>
                     <div class="pin-row">
-                        <span class="info-value">${esc(m.offline_pin || '—')}</span>
-                        ${m.offline_pin ? `<button class="copy-btn" onclick="copyText(this,'${esc(m.offline_pin)}')" title="Copy PIN" aria-label="Copy"><svg class="icon sm"><use href="#i-copy"/></svg></button>` : ''}
+                        <input class="pin-input"
+                               type="text"
+                               inputmode="numeric"
+                               maxlength="20"
+                               placeholder="Set PIN…"
+                               value="${esc(pinVal)}"
+                               data-machine-id="${esc(m.id)}"
+                               data-original="${esc(pinVal)}"
+                               oninput="onPinInputChange(this)" />
+                        <button class="pin-save" onclick="savePin(this)" title="Save PIN" aria-label="Save PIN">
+                            <svg class="icon sm" style="stroke:#fff"><use href="#i-check"/></svg>
+                        </button>
+                        ${pinVal ? `<button class="copy-btn" onclick="copyText(this,'${esc(pinVal)}')" title="Copy PIN" aria-label="Copy"><svg class="icon sm"><use href="#i-copy"/></svg></button>` : ''}
+                    </div>
+                </div>
+                <div class="info-block">
+                    <div class="info-label">
+                        <svg class="icon sm"><use href="#i-key"/></svg>Unlock Count
+                        ${countIsZero ? '<span class="count-badge zero">Blocked</span>' : (m.unlock_count !== null && m.unlock_count <= 3 && m.unlock_count > 0 ? '<span class="count-badge">Low</span>' : '')}
+                    </div>
+                    <div class="count-row">
+                        <input class="count-input" type="number" min="0" max="9999"
+                               inputmode="numeric" pattern="[0-9]*"
+                               value="${countVal}"
+                               placeholder="—"
+                               data-machine-id="${esc(m.id)}"
+                               data-original="${countVal}"
+                               onkeydown="return /[0-9]|Backspace|Delete|ArrowLeft|ArrowRight|Tab|Enter/.test(event.key)"
+                               oninput="onCountInputChange(this)" />
+                        <span class="count-unit">uses</span>
+                        <button class="count-save" onclick="saveCount(this)" title="Save" aria-label="Save">
+                            <svg class="icon sm" style="stroke:#fff"><use href="#i-check"/></svg>
+                        </button>
                     </div>
                 </div>
                 <div class="info-block">
@@ -1368,6 +1495,83 @@
             showToast('Copied to clipboard', 'success');
             setTimeout(() => { btn.classList.remove('copied'); btn.innerHTML = orig; }, 1300);
         } catch { showToast('Could not copy to clipboard', 'error'); }
+    };
+
+    // ───────────────────────────────────────────────────────────
+    //  PIN CONFIG
+    // ───────────────────────────────────────────────────────────
+    window.onPinInputChange = function (input) {
+        const saveBtn  = input.parentElement.querySelector('.pin-save');
+        const original = input.dataset.original || '';
+        saveBtn.classList.toggle('visible', input.value !== original);
+    };
+
+    window.savePin = async function (btn) {
+        const input     = btn.parentElement.querySelector('.pin-input');
+        const machineId = input.dataset.machineId;
+        const pin       = input.value.trim();
+        if (!pin) return showToast('PIN cannot be empty.', 'error');
+
+        const origHtml = btn.innerHTML;
+        btn.innerHTML  = '<span class="spinner"></span>';
+        btn.disabled   = true;
+        try {
+            const url = `${config.base_path}machines/${encodeURIComponent(machineId)}/offline_pin.json?auth=${encodeURIComponent(config.auth_secret)}`;
+            const res = await fetch(url, {
+                method:  'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify(pin)
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            input.dataset.original = pin;
+            btn.classList.remove('visible');
+            showToast('PIN saved.', 'success');
+        } catch (err) {
+            showToast('Save failed: ' + err.message, 'error');
+        } finally {
+            btn.innerHTML = origHtml;
+            btn.disabled  = false;
+        }
+    };
+
+    // ───────────────────────────────────────────────────────────
+    //  UNLOCK COUNT
+    // ───────────────────────────────────────────────────────────
+    window.onCountInputChange = function (input) {
+        const saveBtn  = input.parentElement.querySelector('.count-save');
+        const original = input.dataset.original !== '' ? parseInt(input.dataset.original, 10) : null;
+        const current  = input.value !== '' ? parseInt(input.value, 10) : null;
+        saveBtn.classList.toggle('visible', current !== original);
+    };
+
+    window.saveCount = async function (btn) {
+        const input     = btn.parentElement.querySelector('.count-input');
+        const machineId = input.dataset.machineId;
+        const val       = input.value.trim();
+        if (val === '') return showToast('Count cannot be empty.', 'error');
+        const count = Math.max(0, parseInt(val, 10) || 0);
+
+        const origHtml = btn.innerHTML;
+        btn.innerHTML  = '<span class="spinner"></span>';
+        btn.disabled   = true;
+        try {
+            const url = `${config.base_path}machines/${encodeURIComponent(machineId)}/unlock_count.json?auth=${encodeURIComponent(config.auth_secret)}`;
+            const res = await fetch(url, {
+                method:  'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body:    JSON.stringify(count)
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            input.dataset.original = String(count);
+            input.value = String(count);
+            btn.classList.remove('visible');
+            showToast(`Unlock count set to ${count}.`, 'success');
+        } catch (err) {
+            showToast('Save failed: ' + err.message, 'error');
+        } finally {
+            btn.innerHTML = origHtml;
+            btn.disabled  = false;
+        }
     };
 
     // ───────────────────────────────────────────────────────────

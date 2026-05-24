@@ -19,15 +19,14 @@ namespace SecureDesktopLock.ViewModels
     /// ------------
     ///   1. Admin remote command (primary, online):
     ///      <see cref="UnlockCommandService"/> raises an event → we fire
-    ///      <see cref="UnlockSucceeded"/> directly without prompting the user
-    ///      and WITHOUT rotating the offline PIN.
+    ///      <see cref="UnlockSucceeded"/> directly without prompting the user.
+    ///      Not affected by unlock_count.
     ///   2. Offline PIN (emergency, user-typed):
-    ///      User types the PIN into the PasswordBox → we compare against the
-    ///      cached and Firebase-fetched values.  On match, the PIN is rotated
-    ///      so it is single-use.
+    ///      User types the fixed PIN set by the admin.  Each successful match
+    ///      decrements the remaining unlock count.  When count reaches zero the
+    ///      PIN is blocked until the admin resets it via the dashboard.
     ///   3. Master password (break-glass):
-    ///      Always accepted as a fail-safe regardless of all other paths.
-    ///      Never triggers rotation.
+    ///      Always accepted as a fail-safe.  Not affected by unlock_count.
     /// </summary>
     public sealed class LockViewModel : INotifyPropertyChanged
     {
@@ -39,10 +38,6 @@ namespace SecureDesktopLock.ViewModels
         private readonly OfflinePinService _offlinePinService;
         private readonly UnlockCommandService _unlockCommandService;
 
-        /// <summary>
-        /// Master password loaded from App.config.  Always accepted as a
-        /// fail-safe.  Empty string disables this path safely.
-        /// </summary>
         private readonly string _masterPassword;
 
         // ------------------------------------------------------------------ //
@@ -54,6 +49,14 @@ namespace SecureDesktopLock.ViewModels
         private volatile bool _alreadyUnlocked = false;
         private readonly string _machineId;
         private readonly Dispatcher _uiDispatcher;
+
+        /// <summary>
+        /// Remaining PIN unlock count.
+        ///   -1  = not yet loaded from cache/Firebase (show nothing)
+        ///    0  = exhausted (PIN blocked)
+        ///   >0  = available
+        /// </summary>
+        private int _unlockCountRemaining = -1;
 
         // ------------------------------------------------------------------ //
         //  Constructor                                                        //
@@ -75,10 +78,6 @@ namespace SecureDesktopLock.ViewModels
                 ?? throw new ArgumentNullException(nameof(unlockCommandService));
 
             _machineId = MachineInfo.GetMachineId();
-            // Capture the Application's UI dispatcher for reliable UI marshalling.
-            // SynchronizationContext.Current can be null in edge cases (e.g.
-            // immediately after sleep/resume), causing callbacks to run on the
-            // ThreadPool — which then throws when calling Window.Close().
             _uiDispatcher = Application.Current?.Dispatcher
                             ?? Dispatcher.CurrentDispatcher;
 
@@ -95,8 +94,11 @@ namespace SecureDesktopLock.ViewModels
                 execute: OnUnlockCommandExecuted,
                 canExecute: _ => !IsUnlocking);
 
-            // Subscribe to admin remote-unlock command.
             _unlockCommandService.UnlockRequested += OnAdminUnlockRequested;
+
+            // Load count from cache immediately; background task will refresh from Firebase.
+            LoadCountFromCache();
+            _ = Task.Run(() => RefreshCountFromFirebaseAsync());
         }
 
         // ------------------------------------------------------------------ //
@@ -117,15 +119,39 @@ namespace SecureDesktopLock.ViewModels
 
         public string MachineId => _machineId;
 
+        public int UnlockCountRemaining
+        {
+            get => _unlockCountRemaining;
+            private set
+            {
+                if (_unlockCountRemaining == value) return;
+                _unlockCountRemaining = value;
+                OnPropertyChanged();
+                OnPropertyChanged(nameof(UnlockCountMessage));
+                OnPropertyChanged(nameof(IsCountMessageVisible));
+            }
+        }
+
+        /// <summary>Human-readable remaining-count label shown below the PIN input.</summary>
+        public string UnlockCountMessage
+        {
+            get
+            {
+                if (_unlockCountRemaining < 0) return string.Empty;
+                if (_unlockCountRemaining == 0) return "Mã đã hết lượt sử dụng. Liên hệ admin.";
+                if (_unlockCountRemaining == 1) return "Đây là lần cuối dùng mã này.";
+                return $"Còn {_unlockCountRemaining} lần dùng mã này.";
+            }
+        }
+
+        /// <summary>Hide the counter row entirely while the count is loading (= -1).</summary>
+        public bool IsCountMessageVisible => _unlockCountRemaining >= 0;
+
         // ------------------------------------------------------------------ //
-        //  Commands                                                           //
+        //  Commands / Events                                                  //
         // ------------------------------------------------------------------ //
 
         public ICommand UnlockCommand { get; }
-
-        // ------------------------------------------------------------------ //
-        //  Events                                                             //
-        // ------------------------------------------------------------------ //
 
         public event EventHandler UnlockSucceeded;
 
@@ -133,11 +159,6 @@ namespace SecureDesktopLock.ViewModels
         //  Admin remote unlock                                                //
         // ------------------------------------------------------------------ //
 
-        /// <summary>
-        /// Called by <see cref="UnlockCommandService"/> on a background thread
-        /// when admin clicks "Unlock" on the dashboard.  No password prompt,
-        /// no PIN rotation — just close the lock window.
-        /// </summary>
         private void OnAdminUnlockRequested(object sender, EventArgs e)
         {
             Logger.LogInfo("[LockViewModel] OnAdminUnlockRequested fired (background thread).");
@@ -151,10 +172,8 @@ namespace SecureDesktopLock.ViewModels
 
             PostToUi(() =>
             {
-                Logger.LogInfo("[LockViewModel] Posting unlock to UI thread — invoking UnlockSucceeded.");
                 StatusMessage = "Unlocked by admin…";
                 UnlockSucceeded?.Invoke(this, EventArgs.Empty);
-                Logger.LogInfo("[LockViewModel] UnlockSucceeded invocation returned.");
             });
 
             _ = Task.Run(async () =>
@@ -163,7 +182,6 @@ namespace SecureDesktopLock.ViewModels
                 {
                     await Logger.LogUnlockSuccessAsync(_machineId, isMasterPassword: false)
                         .ConfigureAwait(false);
-                    Logger.LogInfo("[LockViewModel] Unlocked via admin remote command.");
                 }
                 catch (Exception ex)
                 {
@@ -202,24 +220,48 @@ namespace SecureDesktopLock.ViewModels
                 PasswordMatchResult result = await ValidatePinAsync(securePassword)
                     .ConfigureAwait(false);
 
+                // Enforce unlock_count ONLY for OfflinePin matches.  Master
+                // password and admin remote unlock remain fail-safes that always
+                // work, even when the PIN is exhausted.
+                if (result == PasswordMatchResult.OfflinePin && _unlockCountRemaining == 0)
+                {
+                    PostToUi(() =>
+                    {
+                        StatusMessage = "Mã đã hết lượt sử dụng. Liên hệ admin.";
+                        IsUnlocking = false;
+                    });
+                    return;
+                }
+
                 if (result != PasswordMatchResult.NoMatch)
                 {
                     _alreadyUnlocked = true;
 
+                    // Decrement local cache SYNCHRONOUSLY before raising
+                    // UnlockSucceeded.  If we deferred this to a background task,
+                    // an immediate re-lock could spawn a new LockViewModel that
+                    // reads the still-pre-decrement cache and grants a free unlock.
+                    int newCount = -1;
+                    if (result == PasswordMatchResult.OfflinePin)
+                        newCount = _offlinePinService.DecrementLocalCache();
+
                     PostToUi(() =>
                     {
+                        if (newCount >= 0) UnlockCountRemaining = newCount;
                         StatusMessage = "Unlocked successfully…";
                         UnlockSucceeded?.Invoke(this, EventArgs.Empty);
                     });
 
-                    // Background post-unlock: rotate only if matched OfflinePin.
                     _ = Task.Run(async () =>
                     {
                         try
                         {
                             if (result == PasswordMatchResult.OfflinePin)
-                                await _offlinePinService.RotateAsync(_machineId)
+                            {
+                                await _offlinePinService
+                                    .FlushPendingDecrementsAsync(_machineId)
                                     .ConfigureAwait(false);
+                            }
 
                             await Logger.LogUnlockSuccessAsync(
                                     _machineId,
@@ -256,15 +298,11 @@ namespace SecureDesktopLock.ViewModels
             }
         }
 
-        /// <summary>
-        /// Validates the entered PIN against the master password and the
-        /// offline PIN (cache-first, Firebase-second).
-        /// </summary>
         private async Task<PasswordMatchResult> ValidatePinAsync(SecureString secureInput)
         {
             string entered = SecureStringToString(secureInput);
 
-            // Master password — instant fail-safe.
+            // Master password — instant fail-safe, bypasses count.
             if (!string.IsNullOrEmpty(_masterPassword) &&
                 string.Equals(entered, _masterPassword, StringComparison.Ordinal))
             {
@@ -361,6 +399,52 @@ namespace SecureDesktopLock.ViewModels
         }
 
         // ------------------------------------------------------------------ //
+        //  Count loading                                                      //
+        // ------------------------------------------------------------------ //
+
+        private void LoadCountFromCache()
+        {
+            int? cached = _offlinePinService.ReadCachedCount();
+            if (cached.HasValue)
+                UnlockCountRemaining = cached.Value;
+        }
+
+        private async Task RefreshCountFromFirebaseAsync()
+        {
+            try
+            {
+                // Flush any pending offline decrements FIRST so we don't pull a
+                // stale (higher) Firebase value and overwrite the local cache.
+                await _offlinePinService
+                    .FlushPendingDecrementsAsync(_machineId)
+                    .ConfigureAwait(false);
+
+                // If pending decrements are still on disk (Firebase unreachable),
+                // local cache is authoritative — surface it and stop.
+                if (_offlinePinService.HasPendingDecrements())
+                {
+                    int? local = _offlinePinService.ReadCachedCount();
+                    if (local.HasValue) PostToUi(() => UnlockCountRemaining = local.Value);
+                    return;
+                }
+
+                int? count = await _firebaseService
+                    .GetUnlockCountAsync(_machineId)
+                    .ConfigureAwait(false);
+
+                if (count.HasValue)
+                {
+                    _offlinePinService.WriteCountCache(count.Value);
+                    PostToUi(() => UnlockCountRemaining = count.Value);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.LogFirebaseError(ex, "LockViewModel.RefreshCountFromFirebase");
+            }
+        }
+
+        // ------------------------------------------------------------------ //
         //  Helpers                                                            //
         // ------------------------------------------------------------------ //
 
@@ -382,7 +466,7 @@ namespace SecureDesktopLock.ViewModels
             try
             {
                 if (_uiDispatcher.CheckAccess())
-                    action();                       // already on UI thread
+                    action();
                 else
                     _uiDispatcher.BeginInvoke(action);
             }

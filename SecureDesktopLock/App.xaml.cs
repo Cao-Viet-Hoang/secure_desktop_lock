@@ -136,10 +136,10 @@ namespace SecureDesktopLock
             _reLockService.WarningTick += OnReLockWarningTick;
             _reLockService.ReLockRequested += OnReLockRequested;
 
-            // ── 5. Auto-seed offline PIN (fire-and-forget) ────────────────
-            // Pushes any pending offline rotation first, then seeds a fresh
-            // PIN if Firebase has none. Runs in the background.
-            _ = _offlinePinService.EnsurePinExistsAsync(machineId);
+            // ── 5. Initialise offline PIN + unlock count (fire-and-forget) ──
+            // Pushes any pending count decrements first, then syncs PIN and
+            // unlock_count from Firebase to the local cache.
+            _ = _offlinePinService.InitializeAsync(machineId);
 
             // ── 6. Keyboard hook ──────────────────────────────────────────
             _keyboardHook = new KeyboardHookService();
@@ -524,6 +524,16 @@ namespace SecureDesktopLock
             => System.Threading.Tasks.Task.FromResult<int?>(null);
 
         public override System.Threading.Tasks.Task ClearLastSeenAsync(string machineId)
+            => System.Threading.Tasks.Task.CompletedTask;
+
+        public override System.Threading.Tasks.Task<int?> GetUnlockCountAsync(
+            string machineId,
+            CancellationToken ct = default)
+            => System.Threading.Tasks.Task.FromResult<int?>(null);
+
+        public override System.Threading.Tasks.Task SetUnlockCountAsync(
+            string machineId, int count,
+            CancellationToken ct = default)
             => System.Threading.Tasks.Task.CompletedTask;
     }
 }

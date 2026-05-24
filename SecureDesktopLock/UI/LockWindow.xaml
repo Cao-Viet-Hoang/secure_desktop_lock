@@ -36,6 +36,8 @@
         <SolidColorBrush x:Key="InputBackBrush"     Color="#0F0F1A"/>
         <SolidColorBrush x:Key="InputBorderBrush"   Color="#3A3A5C"/>
         <SolidColorBrush x:Key="ButtonHoverBrush"   Color="#C73652"/>
+        <SolidColorBrush x:Key="WarningBrush"       Color="#F59E0B"/>
+        <SolidColorBrush x:Key="DangerBrush"        Color="#EF4444"/>
 
         <!-- ================================================================ -->
         <!-- Button style                                                     -->
@@ -232,15 +234,58 @@
                     HorizontalAlignment="Center"
                     Margin="0,0,0,8"/>
 
-                <!-- Password input -->
+                <!-- Password input — always enabled so the master password
+                     fail-safe keeps working even when the PIN is exhausted. -->
                 <PasswordBox
                     x:Name="PasswordInput"
                     Style="{StaticResource LockPasswordBoxStyle}"
                     Height="48"
-                    Margin="0,0,0,12"
+                    Margin="0,0,0,8"
                     ToolTip="Contact your admin to get the PIN when offline"/>
 
-                <!-- Unlock button -->
+                <!-- Remaining unlock count -->
+                <Border
+                    Visibility="{Binding IsCountMessageVisible, Converter={StaticResource BoolToVisibilityConverter}}"
+                    Margin="0,0,0,10"
+                    Padding="10,6"
+                    CornerRadius="6">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="Background" Value="#1A2A1A"/>
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding UnlockCountRemaining}" Value="1">
+                                    <Setter Property="Background" Value="#2A2010"/>
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding UnlockCountRemaining}" Value="0">
+                                    <Setter Property="Background" Value="#2A1010"/>
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <TextBlock
+                        Text="{Binding UnlockCountMessage}"
+                        FontSize="12"
+                        FontWeight="Medium"
+                        HorizontalAlignment="Center"
+                        TextWrapping="Wrap"
+                        TextAlignment="Center">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Foreground" Value="#7CFF9F"/>
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding UnlockCountRemaining}" Value="1">
+                                        <Setter Property="Foreground" Value="{StaticResource WarningBrush}"/>
+                                    </DataTrigger>
+                                    <DataTrigger Binding="{Binding UnlockCountRemaining}" Value="0">
+                                        <Setter Property="Foreground" Value="{StaticResource DangerBrush}"/>
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </Border>
+
+                <!-- Unlock button — disabled only while a verification is in flight. -->
                 <Button
                     x:Name="UnlockButton"
                     Content="UNLOCK WITH PIN"
