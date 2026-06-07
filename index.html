@@ -555,7 +555,7 @@
 
         .card-body {
             display: grid;
-            grid-template-columns: 1fr 1fr;
+            grid-template-columns: 1fr;
             gap: 10px;
             margin-bottom: 14px;
         }
@@ -709,6 +709,7 @@
             display: none;
             place-items: center;
             transition: all .15s ease;
+            flex-shrink: 0;
         }
         .count-save:hover { background: var(--success-ink); }
         .count-save.visible { display: grid; }
@@ -752,6 +753,7 @@
             display: none;
             place-items: center;
             transition: all .15s ease;
+            flex-shrink: 0;
         }
         .relock-save:hover { background: var(--success-ink); }
         .relock-save.visible { display: grid; }
@@ -896,6 +898,9 @@
         /* ═══════════════════════════════════════════════════════════ */
         @media (min-width: 640px) {
             .machines { grid-template-columns: repeat(2, 1fr); }
+        }
+        @media (min-width: 768px) {
+            .card-body { grid-template-columns: 1fr 1fr; }
         }
         @media (min-width: 1024px) {
             .machines { grid-template-columns: repeat(2, 1fr); }
